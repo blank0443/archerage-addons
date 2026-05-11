@@ -2,6 +2,9 @@
 List of custom AA addons
 
 
+# NOTE: ALMOST ALL OF THE CODE IS WRITTEN BY AI.
+
+
 ## Loot Tracker
 <p>A simple Addon for keeping track of item quantity count in inventory for farming loot</p>
 
