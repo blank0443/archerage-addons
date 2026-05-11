@@ -2,7 +2,7 @@
 ## Loot Tracker
 <p>A simple Addon for keeping track of item quantity count in inventory for farming loot</p>
 
-<img src="img/Screenshot 2026-05-11 070002.png">
+<img src="../img/Screenshot 2026-05-11 070002.png">
 
 
 <ul>
