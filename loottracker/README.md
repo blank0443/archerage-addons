@@ -3,7 +3,7 @@
 <p>A simple Addon for keeping track of item quantity count in inventory for farming loot</p>
 
 <img src="../img/Screenshot 2026-05-11 070002.png" alt="Loot Tracker UI">
-<img src="../img/search window.png" alt="Search Window ">
+<img src="../img/Screenshot 2026-05-11 073928.png" alt="Search Window ">
 
 
 <p>Click on the one of the slot to add/change item to keep track of</p>
