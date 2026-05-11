@@ -1,0 +1,4 @@
+Make click-through raid frame buffer to be on top of actual raid to display warnings
+
+flashing/cycling colors when raid member is low HP
+only keep frames visible that's in range of heal spells
