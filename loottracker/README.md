@@ -1,15 +1,14 @@
-
 ## Loot Tracker
-<p>A simple Addon for keeping track of item quantity count in inventory for farming loot</p>
 
-<img src="../img/Screenshot 2026-05-11 070002.png" alt="Loot Tracker UI">
-<img src="../img/Screenshot 2026-05-11 073928.png" alt="Search Window ">
+A simple addon for keeping track of item quantity count in inventory for farming loot.
+
+![Loot Tracker UI](../img/Screenshot%202026-05-11%20070002.png)
 
 
-<p>Click on the one of the slot to add/change item to keep track of</p>
+![Search Window](../img/Screenshot%202026-05-11%20073928.png)
 
-<ul>
-  <li>Keep track of items farmed (Up to 5).</li>
-  <li>Easily hide Addon when not in use</li>
-  <li>Search item in inventory</li>
-</ul>
+Click on one of the slots to add/change an item to keep track of.
+
+- Keep track of items farmed (up to 5)
+- Easily hide the addon when not in use
+- Search items in inventory
