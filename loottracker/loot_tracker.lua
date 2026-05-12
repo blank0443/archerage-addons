@@ -29,6 +29,9 @@ if previousRuntime ~= nil then
 	if previousRuntime.restoreButton ~= nil then
 		previousRuntime.restoreButton:Show(false)
 	end
+	if previousRuntime.controlsRestoreButton ~= nil then
+		previousRuntime.controlsRestoreButton:Show(false)
+	end
 end
 
 local runtime = {
@@ -44,16 +47,32 @@ local BAG_KIND = 1
 local MAX_BAG_SLOTS = 150
 local SAVE_KEY = "lootTrackerTrackedItems"
 local POSITION_KEY = "lootTrackerWindowPosition"
+local RESTORE_POSITION_KEY = "lootTrackerRestoreButtonPosition"
+local PICKER_POSITION_KEY = "lootTrackerPickerWindowPosition"
+local LAYOUT_KEY = "lootTrackerLayout"
 
-local WINDOW_WIDTH = 242
-local WINDOW_HEIGHT = 86
+local LAYOUT_HORIZONTAL = "horizontal"
+local LAYOUT_VERTICAL = "vertical"
+local WINDOW_HORIZONTAL_WIDTH = 270
+local WINDOW_VERTICAL_WIDTH = 98
+local WINDOW_HORIZONTAL_HEIGHT = 86
+local WINDOW_VERTICAL_HEIGHT = 360
 local RESTORE_BUTTON_WIDTH = 92
 local RESTORE_BUTTON_HEIGHT = 22
 local PADDING = 9
 local HEADER_HEIGHT = 22
+local HEADER_TITLE_WIDTH = 78
+local HEADER_BUTTON_GAP = 4
+local HEADER_BUTTON_HEIGHT = 18
+local ROTATE_BUTTON_WIDTH = 24
+local RESET_BUTTON_WIDTH = 24
+local HIDE_WINDOW_BUTTON_WIDTH = 34
 local BOX_SIZE = 40
 local BOX_GAP = 6
 local BOXES_TOP = PADDING + HEADER_HEIGHT + 7
+local VERTICAL_BOXES_TOP = PADDING + HEADER_HEIGHT + HEADER_BUTTON_GAP + (HEADER_BUTTON_HEIGHT * 3)
+	+ (HEADER_BUTTON_GAP * 3)
+	+ 7
 
 local PICKER_WIDTH = 330
 local PICKER_HEIGHT = 328
@@ -68,6 +87,8 @@ local PICKER_SEARCH_TOP = 42
 local PICKER_SEARCH_HEIGHT = 30
 local PICKER_GRID_TOP = 84
 local PICKER_CONTROL_TOP = PICKER_GRID_TOP + (PICKER_ROWS * (PICKER_ITEM_HEIGHT + PICKER_ITEM_GAP_Y))
+local INVENTORY_FALLBACK_REFRESH_SECONDS = 2.0
+local SEARCH_POLL_INTERVAL = 0.12
 
 local trackedItems = {}
 local rowWidgets = {}
@@ -82,8 +103,16 @@ local pickerSearchTextEventSuppressed = false
 local pickerSearchCharHandlerActive = false
 local isPickerOpen = false
 local refreshRequested = true
+local inventoryDirty = true
+local inventoryItemsByKey = nil
+local inventoryOrderedItems = nil
+local trackerLayout = LAYOUT_HORIZONTAL
+local restoreButtonPositionSaved = false
+local pickerWindowPositionSaved = false
 local UpdatePicker
 local RecreatePickerSearchBox
+local ApplyTrackerLayout
+local AnchorPickerWindow
 local trackerWindow
 
 local function SafeMethod(target, methodName, ...)
@@ -274,6 +303,19 @@ local function ReadInventory()
 	return itemsByKey, orderedItems
 end
 
+local function MarkInventoryDirty()
+	inventoryDirty = true
+	refreshRequested = true
+end
+
+local function GetInventorySnapshot(forceRefresh)
+	if forceRefresh or inventoryDirty or inventoryItemsByKey == nil or inventoryOrderedItems == nil then
+		inventoryItemsByKey, inventoryOrderedItems = ReadInventory()
+		inventoryDirty = false
+	end
+	return inventoryItemsByKey, inventoryOrderedItems
+end
+
 local function ScoreSearchMatch(name, query)
 	local normalizedName = NormalizeName(name)
 	local normalizedQuery = NormalizeName(query)
@@ -314,7 +356,7 @@ local function ScoreSearchMatch(name, query)
 end
 
 local function BuildPickerItems(query)
-	local _, orderedItems = ReadInventory()
+	local _, orderedItems = GetInventorySnapshot(false)
 	local normalizedQuery = NormalizeName(query)
 	if normalizedQuery == "" then
 		return orderedItems
@@ -399,32 +441,132 @@ local function LoadTrackedItems()
 	end
 end
 
-local function SaveWindowPosition(window)
-	if window == nil then
+local function GetWidgetSavedPosition(widget)
+	if widget == nil then
+		return nil, nil
+	end
+
+	local offsetX, offsetY = widget:GetOffset()
+	local uiScale = UIParent:GetUIScale() or 1.0
+	return math.floor((offsetX * uiScale) + 0.5), math.floor((offsetY * uiScale) + 0.5)
+end
+
+local function SaveWidgetPosition(widget, key)
+	if widget == nil or key == nil then
 		return
 	end
 
-	local offsetX, offsetY = window:GetOffset()
-	local uiScale = UIParent:GetUIScale() or 1.0
-	local data = {
-		x = math.floor((offsetX * uiScale) + 0.5),
-		y = math.floor((offsetY * uiScale) + 0.5),
-	}
+	local x, y = GetWidgetSavedPosition(widget)
+	if x == nil or y == nil then
+		return
+	end
 
 	pcall(function()
-		ADDON:ClearData(POSITION_KEY)
-		ADDON:SaveData(POSITION_KEY, data)
+		ADDON:ClearData(key)
+		ADDON:SaveData(key, {
+			x = x,
+			y = y,
+		})
 	end)
 end
 
-local function LoadWindowPosition()
+local function LoadSavedPosition(key, defaultX, defaultY)
 	local ok, data = pcall(function()
-		return ADDON:LoadData(POSITION_KEY)
+		return ADDON:LoadData(key)
 	end)
 	if ok and type(data) == "table" and data.x ~= nil and data.y ~= nil then
-		return tonumber(data.x) or 420, tonumber(data.y) or 320
+		return tonumber(data.x) or defaultX, tonumber(data.y) or defaultY, true
 	end
-	return 420, 320
+	return defaultX, defaultY, false
+end
+
+local function SaveWindowPosition(window)
+	SaveWidgetPosition(window, POSITION_KEY)
+end
+
+local function SaveRestoreButtonPosition(button)
+	SaveWidgetPosition(button, RESTORE_POSITION_KEY)
+	restoreButtonPositionSaved = true
+end
+
+local function SavePickerWindowPosition(window)
+	SaveWidgetPosition(window, PICKER_POSITION_KEY)
+	pickerWindowPositionSaved = true
+end
+
+local function LoadWindowPosition()
+	return LoadSavedPosition(POSITION_KEY, 420, 320)
+end
+
+local function LoadRestoreButtonPosition(defaultX, defaultY)
+	return LoadSavedPosition(RESTORE_POSITION_KEY, defaultX, defaultY)
+end
+
+local function LoadPickerWindowPosition(defaultX, defaultY)
+	return LoadSavedPosition(PICKER_POSITION_KEY, defaultX, defaultY)
+end
+
+local function NormalizeTrackerLayout(value)
+	if value == LAYOUT_VERTICAL then
+		return LAYOUT_VERTICAL
+	end
+	return LAYOUT_HORIZONTAL
+end
+
+local function SaveTrackerLayout()
+	pcall(function()
+		ADDON:ClearData(LAYOUT_KEY)
+		ADDON:SaveData(LAYOUT_KEY, {
+			layout = trackerLayout,
+		})
+	end)
+end
+
+local function LoadTrackerLayout()
+	local ok, data = pcall(function()
+		return ADDON:LoadData(LAYOUT_KEY)
+	end)
+	if ok then
+		if type(data) == "table" then
+			return NormalizeTrackerLayout(data.layout)
+		end
+		if type(data) == "string" then
+			return NormalizeTrackerLayout(data)
+		end
+	end
+	return LAYOUT_HORIZONTAL
+end
+
+local function GetTrackerWindowHeight()
+	if trackerLayout == LAYOUT_VERTICAL then
+		return WINDOW_VERTICAL_HEIGHT
+	end
+	return WINDOW_HORIZONTAL_HEIGHT
+end
+
+local function GetTrackerWindowWidth()
+	if trackerLayout == LAYOUT_VERTICAL then
+		return WINDOW_VERTICAL_WIDTH
+	end
+	return WINDOW_HORIZONTAL_WIDTH
+end
+
+local function GetTrackedRowsSpan()
+	return (TRACKED_SLOT_COUNT * BOX_SIZE) + ((TRACKED_SLOT_COUNT - 1) * BOX_GAP)
+end
+
+local function GetTrackedRowsLeft()
+	if trackerLayout == LAYOUT_VERTICAL then
+		return math.floor((GetTrackerWindowWidth() - BOX_SIZE) / 2)
+	end
+	return math.floor((GetTrackerWindowWidth() - GetTrackedRowsSpan()) / 2)
+end
+
+local function GetTrackedRowsTop()
+	if trackerLayout == LAYOUT_VERTICAL then
+		return VERTICAL_BOXES_TOP
+	end
+	return BOXES_TOP
 end
 
 local function CompactName(value)
@@ -500,16 +642,42 @@ local function SetRowBackground(row, state)
 	end
 end
 
+local function SetRowHover(row, isHovered)
+	if row == nil or row.hoverBorder == nil then
+		return
+	end
+
+	local alpha = 0
+	if isHovered then
+		alpha = 0.82
+	end
+
+	for _, border in ipairs(row.hoverBorder) do
+		border:SetColor(1, 0.86, 0.42, alpha)
+	end
+end
+
 local function SetRowText(row, nameText, countText, state, iconPath)
 	if row == nil then
 		return
 	end
 
 	row.fullName = nameText or ""
-	row.nameLabel:SetText(CompactName(nameText))
-	row.countLabel:SetText(countText or "")
+	local compactName = CompactName(nameText)
+	local nextCountText = countText or ""
+	if row.lastCompactName ~= compactName then
+		row.nameLabel:SetText(compactName)
+		row.lastCompactName = compactName
+	end
+	if row.lastCountText ~= nextCountText then
+		row.countLabel:SetText(nextCountText)
+		row.lastCountText = nextCountText
+	end
 	SetIconDrawable(row.iconDrawable, iconPath)
-	SetRowBackground(row, state)
+	if row.lastState ~= state then
+		SetRowBackground(row, state)
+		row.lastState = state
+	end
 end
 
 local function RemoveTrackedItem(index)
@@ -642,16 +810,20 @@ end
 local function OpenPicker(rowIndex)
 	pickerSlotIndex = rowIndex
 	pickerScrollIndex = 1
-	ClearPickerSearchState()
 	if RecreatePickerSearchBox ~= nil then
 		RecreatePickerSearchBox()
+	else
+		ClearPickerSearchState()
 	end
 	if runtime.pickerWindow ~= nil then
-		runtime.pickerWindow:RemoveAllAnchors()
-		runtime.pickerWindow:AddAnchor("TOPLEFT", trackerWindow, 0, WINDOW_HEIGHT + 8)
+		if AnchorPickerWindow ~= nil then
+			AnchorPickerWindow()
+		else
+			runtime.pickerWindow:RemoveAllAnchors()
+			runtime.pickerWindow:AddAnchor("TOPLEFT", trackerWindow, 0, GetTrackerWindowHeight() + 8)
+		end
 		runtime.pickerWindow:Show(true)
 	end
-	ClearPickerSearchState()
 	if runtime.pickerSearchBox ~= nil then
 		SafeMethod(runtime.pickerSearchBox, "SetFocus")
 		SafeMethod(runtime.pickerSearchBox, "SetFocus", true)
@@ -681,7 +853,7 @@ local function HandleRowClick(rowIndex, mouseButton)
 end
 
 UpdateRows = function()
-	local itemsByKey = ReadInventory()
+	local itemsByKey = GetInventorySnapshot(false)
 
 	for index = 1, TRACKED_SLOT_COUNT do
 		local row = rowWidgets[index]
@@ -700,10 +872,11 @@ UpdateRows = function()
 end
 
 LoadTrackedItems()
+trackerLayout = LoadTrackerLayout()
 
 trackerWindow = CreateEmptyWindow("lootTrackerWindow", "UIParent")
 runtime.window = trackerWindow
-trackerWindow:SetExtent(WINDOW_WIDTH, WINDOW_HEIGHT)
+trackerWindow:SetExtent(GetTrackerWindowWidth(), GetTrackerWindowHeight())
 trackerWindow:EnableDrag(true)
 trackerWindow:Clickable(true)
 trackerWindow:Show(true)
@@ -711,6 +884,8 @@ trackerWindow:Show(true)
 local savedX, savedY = LoadWindowPosition()
 trackerWindow:AddAnchor("TOPLEFT", "UIParent", savedX, savedY)
 
+local restoreSavedX, restoreSavedY, hasSavedRestoreButtonPosition = LoadRestoreButtonPosition(savedX, savedY)
+restoreButtonPositionSaved = hasSavedRestoreButtonPosition
 local restoreButton = UIParent:CreateWidget("button", "lootTrackerRestoreButton", "UIParent", "")
 runtime.restoreButton = restoreButton
 restoreButton:SetStyle("text_default")
@@ -718,7 +893,7 @@ restoreButton:SetText("Loot Tracker")
 restoreButton:SetExtent(RESTORE_BUTTON_WIDTH, RESTORE_BUTTON_HEIGHT)
 restoreButton:EnableDrag(true)
 SafeMethod(restoreButton, "Clickable", true)
-restoreButton:AddAnchor("TOPLEFT", "UIParent", savedX, savedY)
+restoreButton:AddAnchor("TOPLEFT", "UIParent", restoreSavedX, restoreSavedY)
 restoreButton:Show(false)
 
 local function AnchorWidgetAtSavedPosition(widget, x, y)
@@ -730,34 +905,24 @@ local function AnchorWidgetAtSavedPosition(widget, x, y)
 	widget:AddAnchor("TOPLEFT", "UIParent", x, y)
 end
 
-local function AnchorWidgetToCurrentPosition(widgetToMove, positionSource)
-	if widgetToMove == nil or positionSource == nil then
-		return
-	end
-
-	local offsetX, offsetY = positionSource:GetOffset()
-	local uiScale = UIParent:GetUIScale() or 1.0
-	AnchorWidgetAtSavedPosition(
-		widgetToMove,
-		math.floor((offsetX * uiScale) + 0.5),
-		math.floor((offsetY * uiScale) + 0.5)
-	)
-end
-
 local function HideLootTrackerWindow()
 	SaveWindowPosition(trackerWindow)
 	ClosePicker()
-	AnchorWidgetToCurrentPosition(restoreButton, trackerWindow)
+	if not restoreButtonPositionSaved then
+		local windowX, windowY = GetWidgetSavedPosition(trackerWindow)
+		AnchorWidgetAtSavedPosition(restoreButton, windowX, windowY)
+	end
 	trackerWindow:Show(false)
 	restoreButton:Show(true)
 end
 
 local function ShowLootTrackerWindow()
-	SaveWindowPosition(restoreButton)
-	AnchorWidgetToCurrentPosition(trackerWindow, restoreButton)
+	local windowX, windowY = LoadWindowPosition()
+	AnchorWidgetAtSavedPosition(trackerWindow, windowX, windowY)
 	restoreButton:Show(false)
 	trackerWindow:Show(true)
-	refreshRequested = true
+	MarkInventoryDirty()
+	ApplyTrackerLayout()
 	UpdateRows()
 end
 
@@ -773,7 +938,7 @@ restoreButton:SetHandler("OnDragStart", restoreButton.OnDragStart)
 
 function restoreButton:OnDragStop()
 	self:StopMovingOrSizing()
-	SaveWindowPosition(self)
+	SaveRestoreButtonPosition(self)
 end
 restoreButton:SetHandler("OnDragStop", restoreButton.OnDragStop)
 
@@ -783,7 +948,7 @@ background:AddAnchor("BOTTOMRIGHT", trackerWindow, 0, 0)
 
 local headerLabel = trackerWindow:CreateChildWidget("label", "lootTrackerHeaderLabel", 0, true)
 headerLabel:SetText("Loot Tracker")
-headerLabel:SetExtent(76, HEADER_HEIGHT)
+headerLabel:SetExtent(HEADER_TITLE_WIDTH, HEADER_HEIGHT)
 headerLabel.style:SetAlign(ALIGN_LEFT)
 headerLabel.style:SetFontSize(11)
 headerLabel.style:SetColor(0.95, 0.92, 0.82, 1)
@@ -802,45 +967,193 @@ function headerLabel:OnDragStop()
 end
 headerLabel:SetHandler("OnDragStop", headerLabel.OnDragStop)
 
-local hideButton = trackerWindow:CreateChildWidget("button", "lootTrackerHideButton", 0, true)
-hideButton:SetStyle("text_default")
-hideButton:SetText("Hide UI")
-hideButton:SetExtent(58, 18)
-hideButton:AddAnchor("TOPRIGHT", trackerWindow, -PADDING - 54, PADDING + 1)
+local ToggleTrackerLayout
 
-function hideButton:OnClick()
-	HideLootTrackerWindow()
+local rotateButton = trackerWindow:CreateChildWidget("button", "lootTrackerRotateButton", 0, true)
+rotateButton:SetStyle("text_default")
+rotateButton:SetText("R")
+rotateButton:SetExtent(ROTATE_BUTTON_WIDTH, 18)
+
+function rotateButton:OnClick()
+	ToggleTrackerLayout()
 end
-hideButton:SetHandler("OnClick", hideButton.OnClick)
+rotateButton:SetHandler("OnClick", rotateButton.OnClick)
 
 local resetButton = trackerWindow:CreateChildWidget("button", "lootTrackerResetButton", 0, true)
 resetButton:SetStyle("text_default")
-resetButton:SetText("Reset")
-resetButton:SetExtent(50, 18)
-resetButton:AddAnchor("TOPRIGHT", trackerWindow, -PADDING, PADDING + 1)
+resetButton:SetText("C")
+resetButton:SetExtent(RESET_BUTTON_WIDTH, 18)
 
 function resetButton:OnClick()
 	ClearTrackedItems()
 end
 resetButton:SetHandler("OnClick", resetButton.OnClick)
 
+local hideWindowButton = trackerWindow:CreateChildWidget("button", "lootTrackerHideWindowButton", 0, true)
+hideWindowButton:SetStyle("text_default")
+hideWindowButton:SetText("H")
+hideWindowButton:SetExtent(HIDE_WINDOW_BUTTON_WIDTH, 18)
+
+function hideWindowButton:OnClick()
+	HideLootTrackerWindow()
+end
+hideWindowButton:SetHandler("OnClick", hideWindowButton.OnClick)
+
+local function AnchorHeaderControls()
+	headerLabel:RemoveAllAnchors()
+	headerLabel:SetExtent(HEADER_TITLE_WIDTH, HEADER_HEIGHT)
+	headerLabel.style:SetAlign(ALIGN_LEFT)
+
+	if trackerLayout == LAYOUT_VERTICAL then
+		headerLabel:AddAnchor("TOP", trackerWindow, 0, PADDING + 2)
+		headerLabel.style:SetAlign(ALIGN_CENTER)
+
+		rotateButton:RemoveAllAnchors()
+		rotateButton:AddAnchor("TOP", trackerWindow, 0, PADDING + HEADER_HEIGHT + HEADER_BUTTON_GAP)
+
+		resetButton:RemoveAllAnchors()
+		resetButton:AddAnchor(
+			"TOP",
+			trackerWindow,
+			0,
+			PADDING + HEADER_HEIGHT + HEADER_BUTTON_GAP + HEADER_BUTTON_HEIGHT + HEADER_BUTTON_GAP
+		)
+
+		hideWindowButton:RemoveAllAnchors()
+		hideWindowButton:AddAnchor(
+			"TOP",
+			trackerWindow,
+			0,
+			PADDING + HEADER_HEIGHT + HEADER_BUTTON_GAP + (HEADER_BUTTON_HEIGHT * 2) + (HEADER_BUTTON_GAP * 2)
+		)
+		return
+	end
+
+	headerLabel:AddAnchor("TOPLEFT", trackerWindow, PADDING, PADDING + 2)
+
+	hideWindowButton:RemoveAllAnchors()
+	hideWindowButton:AddAnchor("TOPRIGHT", trackerWindow, -PADDING, PADDING + 1)
+
+	resetButton:RemoveAllAnchors()
+	resetButton:AddAnchor(
+		"TOPRIGHT",
+		trackerWindow,
+		-PADDING - HIDE_WINDOW_BUTTON_WIDTH - HEADER_BUTTON_GAP,
+		PADDING + 1
+	)
+
+	rotateButton:RemoveAllAnchors()
+	rotateButton:AddAnchor(
+		"TOPRIGHT",
+		trackerWindow,
+		-PADDING
+			- HIDE_WINDOW_BUTTON_WIDTH
+			- HEADER_BUTTON_GAP
+			- RESET_BUTTON_WIDTH
+			- HEADER_BUTTON_GAP,
+		PADDING + 1
+	)
+
+end
+
+AnchorPickerWindow = function()
+	if runtime.pickerWindow == nil then
+		return
+	end
+
+	runtime.pickerWindow:RemoveAllAnchors()
+	if pickerWindowPositionSaved then
+		local pickerX, pickerY = LoadPickerWindowPosition(0, 0)
+		runtime.pickerWindow:AddAnchor("TOPLEFT", "UIParent", pickerX, pickerY)
+		return
+	end
+
+	runtime.pickerWindow:AddAnchor("TOPLEFT", trackerWindow, 0, GetTrackerWindowHeight() + 8)
+end
+
+local function AnchorTrackedRows()
+	for index = 1, TRACKED_SLOT_COUNT do
+		local row = rowWidgets[index]
+		if row ~= nil then
+			local offsetX = GetTrackedRowsLeft() + ((index - 1) * (BOX_SIZE + BOX_GAP))
+			local offsetY = GetTrackedRowsTop()
+
+			if trackerLayout == LAYOUT_VERTICAL then
+				offsetX = GetTrackedRowsLeft()
+				offsetY = GetTrackedRowsTop() + ((index - 1) * (BOX_SIZE + BOX_GAP))
+			end
+
+			row:RemoveAllAnchors()
+			row:AddAnchor("TOPLEFT", trackerWindow, offsetX, offsetY)
+			row:SetExtent(BOX_SIZE, BOX_SIZE)
+			if row.bg ~= nil then
+				row.bg:SetExtent(BOX_SIZE, BOX_SIZE)
+			end
+		end
+	end
+end
+
+ApplyTrackerLayout = function()
+	trackerWindow:SetExtent(GetTrackerWindowWidth(), GetTrackerWindowHeight())
+	AnchorHeaderControls()
+	AnchorTrackedRows()
+	if isPickerOpen then
+		AnchorPickerWindow()
+	end
+end
+
+ToggleTrackerLayout = function()
+	if trackerLayout == LAYOUT_VERTICAL then
+		trackerLayout = LAYOUT_HORIZONTAL
+	else
+		trackerLayout = LAYOUT_VERTICAL
+	end
+	SaveTrackerLayout()
+	ApplyTrackerLayout()
+	refreshRequested = true
+	UpdateRows()
+end
+
 for index = 1, TRACKED_SLOT_COUNT do
 	local row = trackerWindow:CreateChildWidget("button", "lootTrackerRow" .. tostring(index), 0, true)
 	row.index = index
-	row:SetStyle("text_default")
 	row:SetText("")
 	row:SetExtent(BOX_SIZE, BOX_SIZE)
-	row:AddAnchor("TOPLEFT", trackerWindow, PADDING + ((index - 1) * (BOX_SIZE + BOX_GAP)), BOXES_TOP)
+	row:AddAnchor(
+		"TOPLEFT",
+		trackerWindow,
+		GetTrackedRowsLeft() + ((index - 1) * (BOX_SIZE + BOX_GAP)),
+		GetTrackedRowsTop()
+	)
+	SafeMethod(row, "Clickable", true)
 
 	local rowBackground = row:CreateColorDrawable(0.06, 0.06, 0.07, 0.64, "background")
 	rowBackground:AddAnchor("TOPLEFT", row, 0, 0)
 	rowBackground:SetExtent(BOX_SIZE, BOX_SIZE)
 	row.bg = rowBackground
 
-	local rowHighlight = row:CreateColorDrawable(1, 1, 1, 0.04, "overlay")
-	rowHighlight:AddAnchor("TOPLEFT", row, 0, 0)
-	rowHighlight:SetExtent(BOX_SIZE, 11)
-	row.highlight = rowHighlight
+	local hoverTop = row:CreateColorDrawable(1, 0.86, 0.42, 0, "artwork")
+	hoverTop:AddAnchor("TOPLEFT", row, 0, 0)
+	hoverTop:SetExtent(BOX_SIZE, 1)
+
+	local hoverBottom = row:CreateColorDrawable(1, 0.86, 0.42, 0, "artwork")
+	hoverBottom:AddAnchor("BOTTOMLEFT", row, 0, 0)
+	hoverBottom:SetExtent(BOX_SIZE, 1)
+
+	local hoverLeft = row:CreateColorDrawable(1, 0.86, 0.42, 0, "artwork")
+	hoverLeft:AddAnchor("TOPLEFT", row, 0, 0)
+	hoverLeft:SetExtent(1, BOX_SIZE)
+
+	local hoverRight = row:CreateColorDrawable(1, 0.86, 0.42, 0, "artwork")
+	hoverRight:AddAnchor("TOPRIGHT", row, 0, 0)
+	hoverRight:SetExtent(1, BOX_SIZE)
+
+	row.hoverBorder = {
+		hoverTop,
+		hoverBottom,
+		hoverLeft,
+		hoverRight,
+	}
 
 	local rowIcon = row:CreateIconDrawable("artwork")
 	rowIcon:SetExtent(23, 23)
@@ -871,16 +1184,12 @@ for index = 1, TRACKED_SLOT_COUNT do
 	row.countLabel = countLabel
 
 	function row:OnEnter()
-		if self.highlight ~= nil then
-			self.highlight:SetColor(1, 1, 1, 0.11)
-		end
+		SetRowHover(self, true)
 	end
 	row:SetHandler("OnEnter", row.OnEnter)
 
 	function row:OnLeave()
-		if self.highlight ~= nil then
-			self.highlight:SetColor(1, 1, 1, 0.04)
-		end
+		SetRowHover(self, false)
 	end
 	row:SetHandler("OnLeave", row.OnLeave)
 
@@ -892,13 +1201,21 @@ for index = 1, TRACKED_SLOT_COUNT do
 	rowWidgets[index] = row
 end
 
+ApplyTrackerLayout()
+
 local pickerWindow = CreateEmptyWindow("lootTrackerPickerWindow", "UIParent")
 runtime.pickerWindow = pickerWindow
 pickerWindow:SetExtent(PICKER_WIDTH, PICKER_HEIGHT)
 pickerWindow:EnableDrag(true)
 pickerWindow:Clickable(true)
 pickerWindow:Show(false)
-pickerWindow:AddAnchor("TOPLEFT", trackerWindow, 0, WINDOW_HEIGHT + 8)
+local pickerSavedX, pickerSavedY, hasSavedPickerWindowPosition = LoadPickerWindowPosition(0, 0)
+pickerWindowPositionSaved = hasSavedPickerWindowPosition
+if pickerWindowPositionSaved then
+	pickerWindow:AddAnchor("TOPLEFT", "UIParent", pickerSavedX, pickerSavedY)
+else
+	pickerWindow:AddAnchor("TOPLEFT", trackerWindow, 0, GetTrackerWindowHeight() + 8)
+end
 
 local pickerBackground = pickerWindow:CreateColorDrawable(0, 0, 0, 0.72, "background")
 pickerBackground:AddAnchor("TOPLEFT", pickerWindow, 0, 0)
@@ -921,6 +1238,7 @@ pickerTitle:SetHandler("OnDragStart", pickerTitle.OnDragStart)
 
 function pickerTitle:OnDragStop()
 	pickerWindow:StopMovingOrSizing()
+	SavePickerWindowPosition(pickerWindow)
 end
 pickerTitle:SetHandler("OnDragStop", pickerTitle.OnDragStop)
 
@@ -1276,12 +1594,6 @@ local function OnPickerSearchMouseWheel(delta)
 	pickerWindow:OnMouseWheel(delta)
 end
 
-local function OnPickerSearchUpdate()
-	if isPickerOpen then
-		PollPickerSearchBox()
-	end
-end
-
 local function ClampPickerScroll()
 	local maxStart = #pickerItems - PICKER_VISIBLE_COUNT + 1
 	if maxStart < 1 then
@@ -1360,7 +1672,6 @@ local function AttachPickerSearchHandlers(searchBox)
 	SafeMethod(searchBox, "SetHandler", "OnTextInput", OnPickerSearchChar)
 	SafeMethod(searchBox, "SetHandler", "OnInput", OnPickerSearchChar)
 	SafeMethod(searchBox, "SetHandler", "OnKeyUp", OnPickerSearchKey)
-	searchBox:SetHandler("OnUpdate", OnPickerSearchUpdate)
 	searchBox:SetHandler("OnMouseWheel", OnPickerSearchMouseWheel)
 	searchBox:SetHandler("OnWheel", OnPickerSearchMouseWheel)
 end
@@ -1494,15 +1805,9 @@ pickerWindow:SetHandler("OnDragStart", pickerWindow.OnDragStart)
 
 function pickerWindow:OnDragStop()
 	self:StopMovingOrSizing()
+	SavePickerWindowPosition(self)
 end
 pickerWindow:SetHandler("OnDragStop", pickerWindow.OnDragStop)
-
-function pickerWindow:OnUpdate(dt)
-	if isPickerOpen then
-		PollPickerSearchBox()
-	end
-end
-pickerWindow:SetHandler("OnUpdate", pickerWindow.OnUpdate)
 
 function trackerWindow:OnDragStart()
 	self:StartMoving()
@@ -1526,11 +1831,7 @@ local watchedEvents = {
 
 function trackerWindow:OnEvent(event)
 	if watchedEvents[event] then
-		refreshRequested = true
-		UpdateRows()
-		if isPickerOpen and UpdatePicker ~= nil then
-			UpdatePicker()
-		end
+		MarkInventoryDirty()
 	end
 end
 trackerWindow:SetHandler("OnEvent", trackerWindow.OnEvent)
@@ -1539,28 +1840,28 @@ for eventName, _ in pairs(watchedEvents) do
 	trackerWindow:RegisterEvent(eventName)
 end
 
-local quantityRefreshElapsed = 0
+local inventoryFallbackRefreshElapsed = 0
 function trackerWindow:OnUpdate(dt)
 	if not runtime.active then
 		return
 	end
 
 	local delta = NormalizeDt(dt)
-	quantityRefreshElapsed = quantityRefreshElapsed + delta
+	inventoryFallbackRefreshElapsed = inventoryFallbackRefreshElapsed + delta
 	if isPickerOpen and not IsPickerWindowVisible() then
 		ClosePicker()
 	end
 	if isPickerOpen then
 		pickerSearchPollElapsed = pickerSearchPollElapsed + delta
-		if pickerSearchPollElapsed >= 0.12 then
+		if pickerSearchPollElapsed >= SEARCH_POLL_INTERVAL then
 			pickerSearchPollElapsed = 0
 			PollPickerSearchBox()
 		end
 	end
 
-	if quantityRefreshElapsed >= 0.5 then
-		quantityRefreshElapsed = 0
-		refreshRequested = true
+	if inventoryFallbackRefreshElapsed >= INVENTORY_FALLBACK_REFRESH_SECONDS then
+		inventoryFallbackRefreshElapsed = 0
+		MarkInventoryDirty()
 	end
 
 	if refreshRequested then
