@@ -53,13 +53,11 @@ local LAYOUT_KEY = "lootTrackerLayout"
 
 local LAYOUT_HORIZONTAL = "horizontal"
 local LAYOUT_VERTICAL = "vertical"
-local WINDOW_HORIZONTAL_WIDTH = 270
-local WINDOW_VERTICAL_WIDTH = 98
-local WINDOW_HORIZONTAL_HEIGHT = 86
-local WINDOW_VERTICAL_HEIGHT = 360
 local RESTORE_BUTTON_WIDTH = 92
 local RESTORE_BUTTON_HEIGHT = 22
 local PADDING = 9
+local TRACKER_PADDING = 4
+local TRACKER_TOP_PADDING = 1
 local HEADER_HEIGHT = 22
 local HEADER_TITLE_WIDTH = 78
 local HEADER_BUTTON_GAP = 4
@@ -69,10 +67,11 @@ local RESET_BUTTON_WIDTH = 24
 local HIDE_WINDOW_BUTTON_WIDTH = 34
 local BOX_SIZE = 40
 local BOX_GAP = 6
-local BOXES_TOP = PADDING + HEADER_HEIGHT + 7
-local VERTICAL_BOXES_TOP = PADDING + HEADER_HEIGHT + HEADER_BUTTON_GAP + (HEADER_BUTTON_HEIGHT * 3)
+local TRACKER_ROW_TOP_GAP = 3
+local BOXES_TOP = TRACKER_TOP_PADDING + HEADER_HEIGHT + TRACKER_ROW_TOP_GAP
+local VERTICAL_BOXES_TOP = TRACKER_TOP_PADDING + HEADER_HEIGHT + HEADER_BUTTON_GAP + (HEADER_BUTTON_HEIGHT * 3)
 	+ (HEADER_BUTTON_GAP * 3)
-	+ 7
+	+ TRACKER_ROW_TOP_GAP
 
 local PICKER_WIDTH = 330
 local PICKER_HEIGHT = 328
@@ -109,6 +108,7 @@ local inventoryOrderedItems = nil
 local trackerLayout = LAYOUT_HORIZONTAL
 local restoreButtonPositionSaved = false
 local pickerWindowPositionSaved = false
+local trackerHeaderControlsVisible = true
 local UpdatePicker
 local RecreatePickerSearchBox
 local ApplyTrackerLayout
@@ -116,6 +116,7 @@ local AnchorPickerWindow
 local trackerWindow
 
 local function SafeMethod(target, methodName, ...)
+	-- Safely calls a method on target if it exists and is a function, using pcall to avoid errors.
 	if target == nil then
 		return false
 	end
@@ -126,6 +127,7 @@ local function SafeMethod(target, methodName, ...)
 	return pcall(fn, target, ...)
 end
 
+	-- Normalizes delta time, converting milliseconds to seconds if value >10.
 local function NormalizeDt(dt)
 	local value = tonumber(dt) or 0
 	if value > 10 then
@@ -133,23 +135,27 @@ local function NormalizeDt(dt)
 	end
 	return value
 end
+	-- Trims leading and trailing whitespace from a string value.
 
 local function Trim(value)
 	local text = tostring(value or "")
 	text = string.gsub(text, "^%s+", "")
 	text = string.gsub(text, "%s+$", "")
 	return text
+	-- Normalizes a name by trimming and lowercasing, collapsing multiple spaces to single.
 end
 
 local function NormalizeName(value)
 	local text = string.lower(Trim(value))
 	text = string.gsub(text, "%s+", " ")
+	-- Extracts the item name from table using common field names.
 	return text
 end
 
 local function ExtractItemName(item)
 	if type(item) ~= "table" then
 		return nil
+	-- Extracts the item grade from table using common field names.
 	end
 	return item.name or item.itemName or item.item_name
 end
@@ -183,6 +189,7 @@ local ICON_FIELD_NAMES = {
 	"itemTexture",
 	"item_texture",
 	"path",
+	-- Recursively extracts icon path from item table by trying common field names.
 	"image",
 	"imagePath",
 	"image_path",
@@ -209,12 +216,14 @@ local function ExtractIconPathValue(value, depth)
 		local nested = ExtractIconPathValue(value[fieldName], (depth or 0) + 1)
 		if nested ~= nil then
 			return nested
+	-- Extracts icon path from item by calling ExtractIconPathValue.
 		end
 	end
 
 	return nil
 end
 
+	-- Extracts item count from table by trying common count field names, defaults to 1.
 local function ExtractItemIconPath(item)
 	if type(item) ~= "table" then
 		return nil
@@ -241,6 +250,7 @@ local function ExtractItemCount(item)
 	for _, fieldName in ipairs(countFields) do
 		local value = tonumber(item[fieldName])
 		if value ~= nil and value > 0 then
+	-- Builds a unique key for an item from normalized name, grade and iconPath.
 			return value
 		end
 	end
@@ -249,6 +259,7 @@ local function ExtractItemCount(item)
 end
 
 local function BuildItemKey(name, grade, iconPath)
+	-- Safely reads bag item info using pcall for a position in bag.
 	local normalizedName = NormalizeName(name)
 	if normalizedName == "" then
 		return nil
@@ -293,10 +304,12 @@ local function ReadInventory()
 				itemsByKey[key] = entry
 				orderedItems[#orderedItems + 1] = entry
 			elseif entry.iconPath == nil and iconPath ~= nil then
+	-- Marks inventory as dirty and requests refresh.
 				entry.iconPath = iconPath
 			end
 
 			entry.count = entry.count + count
+	-- Returns cached inventory snapshot or refreshes if dirty or forced.
 		end
 	end
 
@@ -537,22 +550,18 @@ local function LoadTrackerLayout()
 	return LAYOUT_HORIZONTAL
 end
 
-local function GetTrackerWindowHeight()
-	if trackerLayout == LAYOUT_VERTICAL then
-		return WINDOW_VERTICAL_HEIGHT
-	end
-	return WINDOW_HORIZONTAL_HEIGHT
+local function GetTrackedRowsSpan()
+	return (TRACKED_SLOT_COUNT * BOX_SIZE) + ((TRACKED_SLOT_COUNT - 1) * BOX_GAP)
 end
 
 local function GetTrackerWindowWidth()
 	if trackerLayout == LAYOUT_VERTICAL then
-		return WINDOW_VERTICAL_WIDTH
+		if not trackerHeaderControlsVisible then
+			return BOX_SIZE + (TRACKER_PADDING * 2)
+		end
+		return HEADER_TITLE_WIDTH + (TRACKER_PADDING * 2)
 	end
-	return WINDOW_HORIZONTAL_WIDTH
-end
-
-local function GetTrackedRowsSpan()
-	return (TRACKED_SLOT_COUNT * BOX_SIZE) + ((TRACKED_SLOT_COUNT - 1) * BOX_GAP)
+	return GetTrackedRowsSpan() + (TRACKER_PADDING * 2)
 end
 
 local function GetTrackedRowsLeft()
@@ -563,10 +572,21 @@ local function GetTrackedRowsLeft()
 end
 
 local function GetTrackedRowsTop()
+	if not trackerHeaderControlsVisible then
+		return TRACKER_TOP_PADDING
+	end
+
 	if trackerLayout == LAYOUT_VERTICAL then
 		return VERTICAL_BOXES_TOP
 	end
 	return BOXES_TOP
+end
+
+local function GetTrackerWindowHeight()
+	if trackerLayout == LAYOUT_VERTICAL then
+		return GetTrackedRowsTop() + GetTrackedRowsSpan() + TRACKER_PADDING
+	end
+	return GetTrackedRowsTop() + BOX_SIZE + TRACKER_PADDING
 end
 
 local function CompactName(value)
@@ -601,6 +621,7 @@ local function HideIconDrawable(iconDrawable)
 end
 
 local function SetIconDrawable(iconDrawable, iconPath)
+	-- Sets an icon drawable to display the given icon path, clearing previous if needed, or hides if empty.
 	if iconDrawable == nil then
 		return
 	end
@@ -628,6 +649,7 @@ local function SetIconDrawable(iconDrawable, iconPath)
 	end
 end
 
+	-- Sets the background color of a row based on state (tracked, missing, or empty).
 local function SetRowBackground(row, state)
 	if row == nil or row.bg == nil then
 		return
@@ -641,6 +663,7 @@ local function SetRowBackground(row, state)
 		row.bg:SetColor(0.06, 0.06, 0.07, 0.64)
 	end
 end
+	-- Sets the hover border alpha for a row based on isHovered flag.
 
 local function SetRowHover(row, isHovered)
 	if row == nil or row.hoverBorder == nil then
@@ -655,6 +678,7 @@ local function SetRowHover(row, isHovered)
 	for _, border in ipairs(row.hoverBorder) do
 		border:SetColor(1, 0.86, 0.42, alpha)
 	end
+	-- Sets text, compact name, count, icon and background state on a row widget.
 end
 
 local function SetRowText(row, nameText, countText, state, iconPath)
@@ -677,6 +701,7 @@ local function SetRowText(row, nameText, countText, state, iconPath)
 	if row.lastState ~= state then
 		SetRowBackground(row, state)
 		row.lastState = state
+	-- Removes the tracked item at the given index, saves, and requests refresh.
 	end
 end
 
@@ -685,6 +710,7 @@ local function RemoveTrackedItem(index)
 		return
 	end
 	trackedItems[index] = nil
+	-- Sets the tracked item at index to the provided item data, saves, and requests refresh.
 	SaveTrackedItems()
 	refreshRequested = true
 end
@@ -706,6 +732,7 @@ end
 local UpdateRows
 
 local function ResolveTrackedInventoryEntry(itemsByKey, tracked)
+	-- Resolves a tracked item to its current inventory entry by key or by name/grade/icon fallback match.
 	if itemsByKey == nil or tracked == nil then
 		return nil
 	end
@@ -733,6 +760,7 @@ local function ResolveTrackedInventoryEntry(itemsByKey, tracked)
 	return nil
 end
 
+	-- Clears the picker search text, poll state, and clears focus/text on the search box.
 local function ClearPickerSearchState()
 	pickerSearchText = ""
 	pickerLastObservedSearchText = ""
@@ -753,6 +781,7 @@ local function ClearPickerSearchState()
 	end
 	pickerSearchTextEventSuppressed = false
 end
+	-- Hides the picker search box and releases all its event handlers.
 
 local function HidePickerSearchBox()
 	if runtime.pickerSearchBox == nil then
@@ -771,6 +800,7 @@ local function HidePickerSearchBox()
 	SafeMethod(runtime.pickerSearchBox, "ReleaseHandler", "OnUpdate")
 	SafeMethod(runtime.pickerSearchBox, "ReleaseHandler", "OnMouseWheel")
 	SafeMethod(runtime.pickerSearchBox, "ReleaseHandler", "OnWheel")
+	-- Checks if the picker window is currently visible using IsVisible or fallback flag.
 end
 
 local function IsPickerWindowVisible()
@@ -786,6 +816,7 @@ local function IsPickerWindowVisible()
 		end
 	end
 
+	-- Clears all tracked items, saves if any were present, and refreshes rows.
 	return isPickerOpen
 end
 
@@ -803,6 +834,7 @@ local function ClearTrackedItems()
 	end
 	refreshRequested = true
 	if UpdateRows ~= nil then
+	-- Opens the picker for a specific tracked slot, resets scroll and search, anchors picker, shows it and sets focus.
 		UpdateRows()
 	end
 end
@@ -829,6 +861,7 @@ local function OpenPicker(rowIndex)
 		SafeMethod(runtime.pickerSearchBox, "SetFocus", true)
 	end
 	isPickerOpen = true
+	-- Closes the picker, clears search state, hides search box and picker window.
 	if UpdatePicker ~= nil then
 		UpdatePicker()
 	end
@@ -837,6 +870,7 @@ end
 local function ClosePicker()
 	isPickerOpen = false
 	ClearPickerSearchState()
+	-- Handles click on a tracked row: right removes, left opens picker for the slot.
 	HidePickerSearchBox()
 	if runtime.pickerWindow ~= nil then
 		runtime.pickerWindow:Show(false)
@@ -853,6 +887,7 @@ local function HandleRowClick(rowIndex, mouseButton)
 end
 
 UpdateRows = function()
+	-- Updates all tracked rows with current inventory counts or missing state from the snapshot.
 	local itemsByKey = GetInventorySnapshot(false)
 
 	for index = 1, TRACKED_SLOT_COUNT do
@@ -896,6 +931,7 @@ SafeMethod(restoreButton, "Clickable", true)
 restoreButton:AddAnchor("TOPLEFT", "UIParent", restoreSavedX, restoreSavedY)
 restoreButton:Show(false)
 
+	-- Anchors a widget at the given saved screen position.
 local function AnchorWidgetAtSavedPosition(widget, x, y)
 	if widget == nil then
 		return
@@ -904,6 +940,7 @@ local function AnchorWidgetAtSavedPosition(widget, x, y)
 	widget:RemoveAllAnchors()
 	widget:AddAnchor("TOPLEFT", "UIParent", x, y)
 end
+	-- Hides the loot tracker window, saves position, closes picker, shows restore button.
 
 local function HideLootTrackerWindow()
 	SaveWindowPosition(trackerWindow)
@@ -914,6 +951,7 @@ local function HideLootTrackerWindow()
 	end
 	trackerWindow:Show(false)
 	restoreButton:Show(true)
+	-- Shows the loot tracker window at saved position, hides restore button, marks inventory dirty, applies layout and updates rows.
 end
 
 local function ShowLootTrackerWindow()
@@ -923,14 +961,17 @@ local function ShowLootTrackerWindow()
 	trackerWindow:Show(true)
 	MarkInventoryDirty()
 	ApplyTrackerLayout()
+	-- Shows the loot tracker window when restore button is clicked.
 	UpdateRows()
 end
 
 function restoreButton:OnClick()
+	-- Starts moving the restore button on drag start.
 	ShowLootTrackerWindow()
 end
 restoreButton:SetHandler("OnClick", restoreButton.OnClick)
 
+	-- Stops moving the restore button and saves its position on drag stop.
 function restoreButton:OnDragStart()
 	self:StartMoving()
 end
@@ -950,12 +991,14 @@ local headerLabel = trackerWindow:CreateChildWidget("label", "lootTrackerHeaderL
 headerLabel:SetText("Loot Tracker")
 headerLabel:SetExtent(HEADER_TITLE_WIDTH, HEADER_HEIGHT)
 headerLabel.style:SetAlign(ALIGN_LEFT)
+	-- Starts moving the tracker window when header is dragged.
 headerLabel.style:SetFontSize(11)
 headerLabel.style:SetColor(0.95, 0.92, 0.82, 1)
 headerLabel.style:SetOutline(true)
-headerLabel:AddAnchor("TOPLEFT", trackerWindow, PADDING, PADDING + 2)
+headerLabel:AddAnchor("TOPLEFT", trackerWindow, TRACKER_PADDING, TRACKER_TOP_PADDING + 2)
 SafeMethod(headerLabel, "EnableDrag", true)
 
+	-- Stops moving the tracker window and saves position on header drag stop.
 function headerLabel:OnDragStart()
 	trackerWindow:StartMoving()
 end
@@ -966,6 +1009,7 @@ function headerLabel:OnDragStop()
 	SaveWindowPosition(trackerWindow)
 end
 headerLabel:SetHandler("OnDragStop", headerLabel.OnDragStop)
+	-- Toggles the tracker layout when rotate button is clicked.
 
 local ToggleTrackerLayout
 
@@ -975,6 +1019,7 @@ rotateButton:SetText("R")
 rotateButton:SetExtent(ROTATE_BUTTON_WIDTH, 18)
 
 function rotateButton:OnClick()
+	-- Clears all tracked items when reset button is clicked.
 	ToggleTrackerLayout()
 end
 rotateButton:SetHandler("OnClick", rotateButton.OnClick)
@@ -984,6 +1029,7 @@ resetButton:SetStyle("text_default")
 resetButton:SetText("C")
 resetButton:SetExtent(RESET_BUTTON_WIDTH, 18)
 
+	-- Hides the loot tracker window when hide button is clicked.
 function resetButton:OnClick()
 	ClearTrackedItems()
 end
@@ -991,7 +1037,7 @@ resetButton:SetHandler("OnClick", resetButton.OnClick)
 
 local hideWindowButton = trackerWindow:CreateChildWidget("button", "lootTrackerHideWindowButton", 0, true)
 hideWindowButton:SetStyle("text_default")
-hideWindowButton:SetText("H")
+hideWindowButton:SetText("X")
 hideWindowButton:SetExtent(HIDE_WINDOW_BUTTON_WIDTH, 18)
 
 function hideWindowButton:OnClick()
@@ -999,24 +1045,79 @@ function hideWindowButton:OnClick()
 end
 hideWindowButton:SetHandler("OnClick", hideWindowButton.OnClick)
 
+local function SetTrackerHeaderControlsVisible(visible)
+	if trackerHeaderControlsVisible == visible then
+		return
+	end
+
+	local oldX, oldY = GetWidgetSavedPosition(trackerWindow)
+	local oldRowsLeft = GetTrackedRowsLeft()
+	local oldRowsTop = GetTrackedRowsTop()
+
+	trackerHeaderControlsVisible = visible
+	headerLabel:Show(visible)
+	rotateButton:Show(visible)
+	resetButton:Show(visible)
+	hideWindowButton:Show(visible)
+	if ApplyTrackerLayout ~= nil then
+		ApplyTrackerLayout()
+	end
+
+	if oldX ~= nil and oldY ~= nil then
+		AnchorWidgetAtSavedPosition(
+			trackerWindow,
+			oldX + oldRowsLeft - GetTrackedRowsLeft(),
+			oldY + oldRowsTop - GetTrackedRowsTop()
+		)
+	end
+end
+
+local function ShowTrackerHeaderControls()
+	SetTrackerHeaderControlsVisible(true)
+end
+
+local function HideTrackerHeaderControls()
+	SetTrackerHeaderControlsVisible(false)
+end
+
+function trackerWindow:OnEnter()
+	ShowTrackerHeaderControls()
+end
+trackerWindow:SetHandler("OnEnter", trackerWindow.OnEnter)
+
+function trackerWindow:OnLeave()
+	HideTrackerHeaderControls()
+end
+trackerWindow:SetHandler("OnLeave", trackerWindow.OnLeave)
+
+function headerLabel:OnEnter()
+	ShowTrackerHeaderControls()
+end
+headerLabel:SetHandler("OnEnter", headerLabel.OnEnter)
+
+rotateButton:SetHandler("OnEnter", ShowTrackerHeaderControls)
+resetButton:SetHandler("OnEnter", ShowTrackerHeaderControls)
+hideWindowButton:SetHandler("OnEnter", ShowTrackerHeaderControls)
+
 local function AnchorHeaderControls()
+	-- Anchors the header label and control buttons (rotate, reset, hide) based on current tracker layout (horizontal or vertical).
 	headerLabel:RemoveAllAnchors()
 	headerLabel:SetExtent(HEADER_TITLE_WIDTH, HEADER_HEIGHT)
 	headerLabel.style:SetAlign(ALIGN_LEFT)
 
 	if trackerLayout == LAYOUT_VERTICAL then
-		headerLabel:AddAnchor("TOP", trackerWindow, 0, PADDING + 2)
+		headerLabel:AddAnchor("TOP", trackerWindow, 0, TRACKER_TOP_PADDING + 2)
 		headerLabel.style:SetAlign(ALIGN_CENTER)
 
 		rotateButton:RemoveAllAnchors()
-		rotateButton:AddAnchor("TOP", trackerWindow, 0, PADDING + HEADER_HEIGHT + HEADER_BUTTON_GAP)
+		rotateButton:AddAnchor("TOP", trackerWindow, 0, TRACKER_TOP_PADDING + HEADER_HEIGHT + HEADER_BUTTON_GAP)
 
 		resetButton:RemoveAllAnchors()
 		resetButton:AddAnchor(
 			"TOP",
 			trackerWindow,
 			0,
-			PADDING + HEADER_HEIGHT + HEADER_BUTTON_GAP + HEADER_BUTTON_HEIGHT + HEADER_BUTTON_GAP
+			TRACKER_TOP_PADDING + HEADER_HEIGHT + HEADER_BUTTON_GAP + HEADER_BUTTON_HEIGHT + HEADER_BUTTON_GAP
 		)
 
 		hideWindowButton:RemoveAllAnchors()
@@ -1024,38 +1125,39 @@ local function AnchorHeaderControls()
 			"TOP",
 			trackerWindow,
 			0,
-			PADDING + HEADER_HEIGHT + HEADER_BUTTON_GAP + (HEADER_BUTTON_HEIGHT * 2) + (HEADER_BUTTON_GAP * 2)
+			TRACKER_TOP_PADDING + HEADER_HEIGHT + HEADER_BUTTON_GAP + (HEADER_BUTTON_HEIGHT * 2) + (HEADER_BUTTON_GAP * 2)
 		)
 		return
 	end
 
-	headerLabel:AddAnchor("TOPLEFT", trackerWindow, PADDING, PADDING + 2)
+	headerLabel:AddAnchor("TOPLEFT", trackerWindow, TRACKER_PADDING, TRACKER_TOP_PADDING + 2)
 
 	hideWindowButton:RemoveAllAnchors()
-	hideWindowButton:AddAnchor("TOPRIGHT", trackerWindow, -PADDING, PADDING + 1)
+	hideWindowButton:AddAnchor("TOPRIGHT", trackerWindow, -TRACKER_PADDING, TRACKER_TOP_PADDING + 1)
 
 	resetButton:RemoveAllAnchors()
 	resetButton:AddAnchor(
 		"TOPRIGHT",
 		trackerWindow,
-		-PADDING - HIDE_WINDOW_BUTTON_WIDTH - HEADER_BUTTON_GAP,
-		PADDING + 1
+		-TRACKER_PADDING - HIDE_WINDOW_BUTTON_WIDTH - HEADER_BUTTON_GAP,
+		TRACKER_TOP_PADDING + 1
 	)
 
 	rotateButton:RemoveAllAnchors()
 	rotateButton:AddAnchor(
 		"TOPRIGHT",
 		trackerWindow,
-		-PADDING
+		-TRACKER_PADDING
 			- HIDE_WINDOW_BUTTON_WIDTH
 			- HEADER_BUTTON_GAP
 			- RESET_BUTTON_WIDTH
 			- HEADER_BUTTON_GAP,
-		PADDING + 1
+		TRACKER_TOP_PADDING + 1
 	)
 
 end
 
+	-- Anchors the picker window either at saved position or below the tracker window.
 AnchorPickerWindow = function()
 	if runtime.pickerWindow == nil then
 		return
@@ -1070,6 +1172,7 @@ AnchorPickerWindow = function()
 
 	runtime.pickerWindow:AddAnchor("TOPLEFT", trackerWindow, 0, GetTrackerWindowHeight() + 8)
 end
+	-- Anchors all tracked row widgets according to current layout (horizontal row or vertical column).
 
 local function AnchorTrackedRows()
 	for index = 1, TRACKED_SLOT_COUNT do
@@ -1091,6 +1194,7 @@ local function AnchorTrackedRows()
 			end
 		end
 	end
+	-- Applies the current tracker layout: resizes window, anchors header and rows, and anchors picker if open.
 end
 
 ApplyTrackerLayout = function()
@@ -1099,6 +1203,7 @@ ApplyTrackerLayout = function()
 	AnchorTrackedRows()
 	if isPickerOpen then
 		AnchorPickerWindow()
+	-- Toggles between horizontal and vertical layout, saves it, applies, and refreshes display.
 	end
 end
 
@@ -1179,19 +1284,24 @@ for index = 1, TRACKED_SLOT_COUNT do
 	countLabel.style:SetFontSize(9)
 	countLabel.style:SetColor(0.92, 0.86, 0.62, 1)
 	countLabel.style:SetOutline(true)
+	-- Sets hover state to true for the row on mouse enter.
 	countLabel:AddAnchor("BOTTOM", row, 0, -3)
 	SafeMethod(countLabel, "EnablePick", false)
 	row.countLabel = countLabel
 
 	function row:OnEnter()
+		-- Sets hover state to true for the row on mouse enter.
+		ShowTrackerHeaderControls()
 		SetRowHover(self, true)
 	end
 	row:SetHandler("OnEnter", row.OnEnter)
 
+		-- Sets hover state to false for the row on mouse leave.
 	function row:OnLeave()
 		SetRowHover(self, false)
 	end
 	row:SetHandler("OnLeave", row.OnLeave)
+		-- Handles click on a tracked row: right click removes item, left opens picker.
 
 	function row:OnClick(mouseButton)
 		HandleRowClick(self.index, mouseButton)
@@ -1202,6 +1312,7 @@ for index = 1, TRACKED_SLOT_COUNT do
 end
 
 ApplyTrackerLayout()
+HideTrackerHeaderControls()
 
 local pickerWindow = CreateEmptyWindow("lootTrackerPickerWindow", "UIParent")
 runtime.pickerWindow = pickerWindow
@@ -1265,11 +1376,13 @@ _G.__LOOT_TRACKER_SEARCH_BOX_SERIAL = _G.__LOOT_TRACKER_SEARCH_BOX_SERIAL or 0
 local pickerSearchBox = nil
 
 local function NextPickerSearchBoxName()
+	-- Generates the next unique name for the picker search box to avoid conflicts.
 	_G.__LOOT_TRACKER_SEARCH_BOX_SERIAL = _G.__LOOT_TRACKER_SEARCH_BOX_SERIAL + 1
 	return "lootTrackerPickerSearchBox" .. tostring(_G.__LOOT_TRACKER_SEARCH_BOX_SERIAL)
 end
 
 local function ConfigurePickerSearchBox(searchBox)
+	-- Configures a picker search box edit widget with anchors, size, font, and visibility.
 	if searchBox == nil then
 		return
 	end
@@ -1324,6 +1437,7 @@ local pickerSearchGetterCandidates = {
 }
 
 local function ReadPickerSearchBoxText()
+	-- Reads the current text from the picker search box by trying multiple getter methods until a non-empty string is found.
 	local sawEmptyText = false
 	local searchBox = runtime.pickerSearchBox
 	if searchBox == nil then
@@ -1360,6 +1474,7 @@ local function ReadPickerSearchBoxText()
 end
 
 local function SyncPickerSearchBoxText(text)
+	-- Synchronizes the picker search box text across multiple possible setter methods while suppressing events.
 	local searchBox = runtime.pickerSearchBox
 	if searchBox == nil then
 		return
@@ -1375,8 +1490,10 @@ local function SyncPickerSearchBoxText(text)
 end
 
 local function DropLastSearchCharacter(text)
+	-- Drops the last character from text, handling multi-byte UTF8 by finding proper cut point.
 	local len = string.len(text or "")
 	if len <= 0 then
+	-- Drops the last character from text, handling multi-byte UTF8 by finding proper cut point.
 		return ""
 	end
 
@@ -1406,22 +1523,27 @@ local function NormalizeKeyToken(value)
 	return text
 end
 
+	-- Normalizes a key value to lowercase token without spaces/underscores for comparison.
 local function IsBackspaceKey(value)
+	-- Checks if key token is backspace key.
 	local token = NormalizeKeyToken(value)
 	return token == "backspace" or token == "back" or token == "8"
 end
 
 local function IsDeleteKey(value)
+	-- Checks if key token is delete key.
 	local token = NormalizeKeyToken(value)
 	return token == "delete" or token == "del" or token == "46"
 end
 
 local function IsClearSearchKey(value)
+	-- Checks if key token is clear search (escape).
 	local token = NormalizeKeyToken(value)
 	return token == "escape" or token == "esc" or token == "27"
 end
 
 local function FirstPrintableStringArg(...)
+	-- Extracts the first printable string arg from varargs, handling numbers as chars if in range.
 	for i = 1, select("#", ...) do
 		local value = select(i, ...)
 		if type(value) == "number" then
@@ -1443,6 +1565,7 @@ local function FirstPrintableStringArg(...)
 end
 
 local function FirstSearchKeyArg(...)
+	-- Extracts the first string or number arg from varargs for search key handling.
 	for i = 1, select("#", ...) do
 		local value = select(i, ...)
 		if type(value) == "string" or type(value) == "number" then
@@ -1453,6 +1576,7 @@ local function FirstSearchKeyArg(...)
 end
 
 local function SearchCharacterFromKey(value)
+	-- Converts a key value to a printable search character, handling numbers, letters, space, numpad etc.
 	if type(value) == "number" then
 		if value == 32 then
 			return " "
@@ -1495,6 +1619,7 @@ local function SearchCharacterFromKey(value)
 end
 
 local function ApplyPickerSearchText(nextSearchText, syncSearchBox)
+	-- Applies new search text to picker, updates state, resets scroll, syncs box if needed, and refreshes picker.
 	local text = tostring(nextSearchText or "")
 	if text == pickerSearchText then
 		return
@@ -1509,6 +1634,7 @@ local function ApplyPickerSearchText(nextSearchText, syncSearchBox)
 end
 
 local function PollPickerSearchBox()
+	-- Polls the picker search box for current text and applies it if changed.
 	local text = ReadPickerSearchBoxText()
 	if text ~= nil then
 		ApplyPickerSearchText(text, false)
@@ -1516,6 +1642,7 @@ local function PollPickerSearchBox()
 end
 
 local function AppendPickerSearchText(text)
+	-- Appends text to picker search, handling multi-char or single char, then updates.
 	if text == nil or text == "" then
 		PollPickerSearchBox()
 		return
@@ -1529,6 +1656,7 @@ local function AppendPickerSearchText(text)
 end
 
 local function HandlePickerSearchKey(...)
+	-- Handles key input for picker search (backspace, delete, escape, printable chars). Updates search text accordingly.
 	local key = FirstSearchKeyArg(...)
 	if key == nil then
 		PollPickerSearchBox()
@@ -1552,6 +1680,7 @@ local function HandlePickerSearchKey(...)
 end
 
 local function HandlePickerSearchChar(...)
+	-- Handles character input for picker search. Sets active flag and appends printable text.
 	local text = FirstPrintableStringArg(...)
 	if text ~= nil then
 		pickerSearchCharHandlerActive = true
@@ -1560,6 +1689,7 @@ local function HandlePickerSearchChar(...)
 end
 
 local function FirstStringArg(...)
+	-- Extracts the first string argument from varargs, used for search change events.
 	for i = 1, select("#", ...) do
 		local value = select(i, ...)
 		if type(value) == "string" then
@@ -1570,6 +1700,7 @@ local function FirstStringArg(...)
 end
 
 local function OnPickerSearchChanged(...)
+	-- Handler for picker search text changed event. Applies the new search text if not suppressed.
 	if pickerSearchTextEventSuppressed then
 		return
 	end
@@ -1583,18 +1714,22 @@ local function OnPickerSearchChanged(...)
 end
 
 local function OnPickerSearchKey(...)
+	-- Handler for picker search key input. Delegates to HandlePickerSearchKey.
 	HandlePickerSearchKey(...)
 end
 
 local function OnPickerSearchChar(...)
+	-- Handler for picker search char input. Sets flag and appends the character to search text.
 	HandlePickerSearchChar(...)
 end
 
 local function OnPickerSearchMouseWheel(delta)
+	-- Handles mouse wheel on picker search box by delegating to picker window.
 	pickerWindow:OnMouseWheel(delta)
 end
 
 local function ClampPickerScroll()
+	-- Clamps the picker scroll index to valid range based on total items and visible count.
 	local maxStart = #pickerItems - PICKER_VISIBLE_COUNT + 1
 	if maxStart < 1 then
 		maxStart = 1
@@ -1607,6 +1742,7 @@ local function ClampPickerScroll()
 end
 
 local function SetPickerButton(button, item)
+	-- Sets the item data on a picker button widget and updates its labels, icon, and background color based on whether an item is provided or not.
 	button.itemData = item
 	if item == nil then
 		button.nameLabel:SetText("")
@@ -1622,7 +1758,9 @@ local function SetPickerButton(button, item)
 	button.bg:SetColor(0.08, 0.12, 0.16, 0.88)
 end
 
+	-- Updates the picker UI: rebuilds the filtered item list, clamps scroll, populates visible buttons, and updates the status label with visible range.
 UpdatePicker = function()
+	-- Updates the picker UI: rebuilds the filtered item list, clamps scroll, populates visible buttons, and updates the status label with visible range.
 	pickerItems = BuildPickerItems(pickerSearchText)
 	ClampPickerScroll()
 
@@ -1643,19 +1781,24 @@ UpdatePicker = function()
 		pickerStatusLabel:SetText(tostring(firstVisible) .. "-" .. tostring(lastVisible) .. " / " .. tostring(total))
 	end
 end
+	-- Scrolls the picker by the given delta items, clamps the scroll index, and refreshes the picker display.
+	-- Scrolls the picker by the given delta items, clamps the scroll index, and refreshes the picker display.
 
 local function ScrollPicker(deltaItems)
 	pickerScrollIndex = pickerScrollIndex + deltaItems
 	ClampPickerScroll()
 	UpdatePicker()
+	-- Handles click on the picker up button to scroll up by one column.
 end
 
 function pickerUpButton:OnClick()
 	ScrollPicker(-PICKER_COLUMNS)
 end
+	-- Handles click on the picker down button to scroll down by one column.
 pickerUpButton:SetHandler("OnClick", pickerUpButton.OnClick)
 
 function pickerDownButton:OnClick()
+	-- Attaches all necessary event handlers (text change, key, mouse wheel) to the picker search box.
 	ScrollPicker(PICKER_COLUMNS)
 end
 pickerDownButton:SetHandler("OnClick", pickerDownButton.OnClick)
@@ -1673,6 +1816,7 @@ local function AttachPickerSearchHandlers(searchBox)
 	SafeMethod(searchBox, "SetHandler", "OnInput", OnPickerSearchChar)
 	SafeMethod(searchBox, "SetHandler", "OnKeyUp", OnPickerSearchKey)
 	searchBox:SetHandler("OnMouseWheel", OnPickerSearchMouseWheel)
+	-- Recreates the picker search box widget, clears state, configures it, attaches handlers, and returns the new box.
 	searchBox:SetHandler("OnWheel", OnPickerSearchMouseWheel)
 end
 
@@ -1747,6 +1891,7 @@ for rowIndex = 1, PICKER_ROWS do
 		itemButton.countLabel = itemCountLabel
 
 		function itemButton:OnEnter()
+		-- Handles mouse enter event on picker item button. Increases highlight opacity for visual feedback.
 			if self.highlight ~= nil then
 				self.highlight:SetColor(1, 1, 1, 0.11)
 			end
@@ -1754,6 +1899,7 @@ for rowIndex = 1, PICKER_ROWS do
 		itemButton:SetHandler("OnEnter", itemButton.OnEnter)
 
 		function itemButton:OnLeave()
+		-- Handles mouse leave event on picker item button. Reduces highlight opacity.
 			if self.highlight ~= nil then
 				self.highlight:SetColor(1, 1, 1, 0.04)
 			end
@@ -1761,6 +1907,7 @@ for rowIndex = 1, PICKER_ROWS do
 		itemButton:SetHandler("OnLeave", itemButton.OnLeave)
 
 		function itemButton:OnClick()
+		-- Handles click on a picker item button. Sets the selected item to the tracked slot, closes the picker, and updates rows.
 			if self.itemData == nil or pickerSlotIndex == nil then
 				return
 			end
@@ -1771,6 +1918,7 @@ for rowIndex = 1, PICKER_ROWS do
 		itemButton:SetHandler("OnClick", itemButton.OnClick)
 
 		function itemButton:OnMouseWheel(delta)
+		-- Handles mouse wheel events on picker item buttons by delegating to the picker window's wheel handler.
 			pickerWindow:OnMouseWheel(delta)
 		end
 		itemButton:SetHandler("OnMouseWheel", itemButton.OnMouseWheel)
@@ -1781,6 +1929,7 @@ for rowIndex = 1, PICKER_ROWS do
 end
 
 function pickerWindow:OnHide()
+	-- Handles the OnHide event for the picker window. Sets picker open flag to false and clears search state.
 	isPickerOpen = false
 	ClearPickerSearchState()
 	HidePickerSearchBox()
@@ -1788,6 +1937,7 @@ end
 pickerWindow:SetHandler("OnHide", pickerWindow.OnHide)
 
 function pickerWindow:OnMouseWheel(delta)
+	-- Handles the OnMouseWheel event for the picker window. Scrolls the picker items up or down based on wheel delta.
 	local amount = tonumber(delta) or 0
 	if amount > 0 then
 		ScrollPicker(-PICKER_COLUMNS)
@@ -1799,22 +1949,26 @@ pickerWindow:SetHandler("OnMouseWheel", pickerWindow.OnMouseWheel)
 pickerWindow:SetHandler("OnWheel", pickerWindow.OnMouseWheel)
 
 function pickerWindow:OnDragStart()
+	-- Handles the OnDragStart event for the picker window. Initiates moving the picker window.
 	self:StartMoving()
 end
 pickerWindow:SetHandler("OnDragStart", pickerWindow.OnDragStart)
 
 function pickerWindow:OnDragStop()
+	-- Handles the OnDragStop event for the picker window. Stops moving/sizing and saves the picker window's position.
 	self:StopMovingOrSizing()
 	SavePickerWindowPosition(self)
 end
 pickerWindow:SetHandler("OnDragStop", pickerWindow.OnDragStop)
 
 function trackerWindow:OnDragStart()
+	-- Handles the OnDragStart event for the tracker window. Initiates moving the window.
 	self:StartMoving()
 end
 trackerWindow:SetHandler("OnDragStart", trackerWindow.OnDragStart)
 
 function trackerWindow:OnDragStop()
+	-- Handles the OnDragStop event for the tracker window. Stops moving/sizing and saves the current window position to persistent storage.
 	self:StopMovingOrSizing()
 	SaveWindowPosition(self)
 end
@@ -1842,6 +1996,7 @@ end
 
 local inventoryFallbackRefreshElapsed = 0
 function trackerWindow:OnUpdate(dt)
+	-- Handles the OnUpdate event for the tracker window. Performs periodic tasks such as inventory fallback refresh, picker search polling when open, and updating rows/picker when refreshRequested flag is set.
 	if not runtime.active then
 		return
 	end
