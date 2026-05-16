@@ -10,7 +10,8 @@ A simple addon for keeping track of item quantity count in inventory for farming
 Click on one of the slots to add/change an item to keep track of.
 
 - Keep track of items farmed (up to 5)
-- Easily hide the addon when not in use (H Button)
+- Easily hide the addon when not in use (X Button)
 - Search items in inventory (Click on box slot)
 - Switch Between vertical or horizontal display (R Button)
 - Easily clear tracked items (C Button)
+- Automatically hide UI buttons when not hovered.
