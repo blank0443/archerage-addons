@@ -2,10 +2,16 @@
 
 A simple addon for keeping track of item quantity count in inventory for farming loot.
 
+### NOTE: Use command "/loottracker reset" to reposition the window if it unreachable/disappears. 
+
 ![Loot Tracker UI](../img/Screenshot%202026-05-11%20070002.png)
 
 
 ![Search Window](../img/Screenshot%202026-05-11%20073928.png)
+
+
+
+
 
 Click on one of the slots to add/change an item to keep track of.
 
