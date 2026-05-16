@@ -113,6 +113,7 @@ local UpdatePicker
 local RecreatePickerSearchBox
 local ApplyTrackerLayout
 local AnchorPickerWindow
+local SetTrackerHeaderControlsVisible
 local trackerWindow
 
 local function SafeMethod(target, methodName, ...)
@@ -943,6 +944,9 @@ end
 	-- Hides the loot tracker window, saves position, closes picker, shows restore button.
 
 local function HideLootTrackerWindow()
+	if SetTrackerHeaderControlsVisible ~= nil then
+		SetTrackerHeaderControlsVisible(true)
+	end
 	SaveWindowPosition(trackerWindow)
 	ClosePicker()
 	if not restoreButtonPositionSaved then
@@ -955,10 +959,14 @@ local function HideLootTrackerWindow()
 end
 
 local function ShowLootTrackerWindow()
+	trackerHeaderControlsVisible = true
 	local windowX, windowY = LoadWindowPosition()
 	AnchorWidgetAtSavedPosition(trackerWindow, windowX, windowY)
 	restoreButton:Show(false)
 	trackerWindow:Show(true)
+	if SetTrackerHeaderControlsVisible ~= nil then
+		SetTrackerHeaderControlsVisible(true)
+	end
 	MarkInventoryDirty()
 	ApplyTrackerLayout()
 	-- Shows the loot tracker window when restore button is clicked.
@@ -1045,8 +1053,12 @@ function hideWindowButton:OnClick()
 end
 hideWindowButton:SetHandler("OnClick", hideWindowButton.OnClick)
 
-local function SetTrackerHeaderControlsVisible(visible)
+SetTrackerHeaderControlsVisible = function(visible)
 	if trackerHeaderControlsVisible == visible then
+		headerLabel:Show(visible)
+		rotateButton:Show(visible)
+		resetButton:Show(visible)
+		hideWindowButton:Show(visible)
 		return
 	end
 
