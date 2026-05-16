@@ -16,6 +16,8 @@ ADDON:ImportObject(OBJECT_TYPE.EDITBOX)
 ADDON:ImportObject(OBJECT_TYPE.ICON_DRAWABLE)
 
 ADDON:ImportAPI(API_TYPE.BAG.id)
+ADDON:ImportAPI(API_TYPE.CHAT.id)
+ADDON:ImportAPI(API_TYPE.UNIT.id)
 
 local previousRuntime = _G.__LOOT_TRACKER_RUNTIME
 if previousRuntime ~= nil then
@@ -32,6 +34,9 @@ if previousRuntime ~= nil then
 	if previousRuntime.controlsRestoreButton ~= nil then
 		previousRuntime.controlsRestoreButton:Show(false)
 	end
+	if previousRuntime.chatCommandListener ~= nil then
+		previousRuntime.chatCommandListener:Show(false)
+	end
 end
 
 local runtime = {
@@ -39,6 +44,7 @@ local runtime = {
 	window = nil,
 	pickerWindow = nil,
 	restoreButton = nil,
+	chatCommandListener = nil,
 }
 _G.__LOOT_TRACKER_RUNTIME = runtime
 
@@ -940,6 +946,21 @@ local function AnchorWidgetAtSavedPosition(widget, x, y)
 
 	widget:RemoveAllAnchors()
 	widget:AddAnchor("TOPLEFT", "UIParent", x, y)
+end
+
+local function CenterLootTrackerWindow()
+	ClosePicker()
+	restoreButton:Show(false)
+	trackerWindow:Show(true)
+	if SetTrackerHeaderControlsVisible ~= nil then
+		SetTrackerHeaderControlsVisible(true)
+	end
+	MarkInventoryDirty()
+	ApplyTrackerLayout()
+	trackerWindow:RemoveAllAnchors()
+	trackerWindow:AddAnchor("CENTER", "UIParent", 0, 0)
+	SaveWindowPosition(trackerWindow)
+	UpdateRows()
 end
 	-- Hides the loot tracker window, saves position, closes picker, shows restore button.
 
@@ -1993,7 +2014,47 @@ local watchedEvents = {
 	REMOVED_ITEM = true,
 	ITEM_ACQUISITION_BY_LOOT = true,
 	SHOW_ADDED_ITEM = true,
+	CHAT_MESSAGE = true,
+	CHAT_FAILED = true,
 }
+
+local function IsLootTrackerResetCommandText(value)
+	local text = string.lower(Trim(value))
+	if text ~= "/loottracker reset" then
+		return false
+	end
+
+	return true
+end
+
+local function IsOwnLootTrackerResetCommand(name, message)
+	if not IsLootTrackerResetCommandText(message) then
+		return false
+	end
+
+	if X2Unit == nil or type(X2Unit.UnitName) ~= "function" then
+		return true
+	end
+
+	return name == X2Unit:UnitName("player")
+end
+
+local function HasLootTrackerResetCommandText(...)
+	for index = 1, select("#", ...) do
+		if IsLootTrackerResetCommandText(select(index, ...)) then
+			return true
+		end
+	end
+	return false
+end
+
+local function HandleLootTrackerChatCommand(channel, relation, name, message, info, ...)
+	if IsOwnLootTrackerResetCommand(name, message)
+		or HasLootTrackerResetCommandText(channel, relation, name, message, info, ...)
+	then
+		CenterLootTrackerWindow()
+	end
+end
 
 function trackerWindow:OnEvent(event)
 	if watchedEvents[event] then
@@ -2003,8 +2064,23 @@ end
 trackerWindow:SetHandler("OnEvent", trackerWindow.OnEvent)
 
 for eventName, _ in pairs(watchedEvents) do
-	trackerWindow:RegisterEvent(eventName)
+	if eventName ~= "CHAT_MESSAGE" and eventName ~= "CHAT_FAILED" then
+		trackerWindow:RegisterEvent(eventName)
+	end
 end
+
+local chatCommandListener = CreateEmptyWindow("lootTrackerChatCommandListener", "UIParent")
+runtime.chatCommandListener = chatCommandListener
+chatCommandListener:Show(false)
+
+function chatCommandListener:OnEvent(event, ...)
+	if event == "CHAT_MESSAGE" or event == "CHAT_FAILED" then
+		HandleLootTrackerChatCommand(...)
+	end
+end
+chatCommandListener:SetHandler("OnEvent", chatCommandListener.OnEvent)
+chatCommandListener:RegisterEvent("CHAT_MESSAGE")
+chatCommandListener:RegisterEvent("CHAT_FAILED")
 
 local inventoryFallbackRefreshElapsed = 0
 function trackerWindow:OnUpdate(dt)
