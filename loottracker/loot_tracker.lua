@@ -562,10 +562,14 @@ local function GetTrackedRowsSpan()
 end
 
 local function GetTrackerWindowWidth()
-	if trackerLayout == LAYOUT_VERTICAL then
-		if not trackerHeaderControlsVisible then
-			return BOX_SIZE + (TRACKER_PADDING * 2)
+	if not trackerHeaderControlsVisible then
+		if trackerLayout == LAYOUT_VERTICAL then
+			return BOX_SIZE
 		end
+		return GetTrackedRowsSpan()
+	end
+
+	if trackerLayout == LAYOUT_VERTICAL then
 		return HEADER_TITLE_WIDTH + (TRACKER_PADDING * 2)
 	end
 	return GetTrackedRowsSpan() + (TRACKER_PADDING * 2)
@@ -580,7 +584,7 @@ end
 
 local function GetTrackedRowsTop()
 	if not trackerHeaderControlsVisible then
-		return TRACKER_TOP_PADDING
+		return 0
 	end
 
 	if trackerLayout == LAYOUT_VERTICAL then
@@ -591,7 +595,13 @@ end
 
 local function GetTrackerWindowHeight()
 	if trackerLayout == LAYOUT_VERTICAL then
+		if not trackerHeaderControlsVisible then
+			return GetTrackedRowsSpan()
+		end
 		return GetTrackedRowsTop() + GetTrackedRowsSpan() + TRACKER_PADDING
+	end
+	if not trackerHeaderControlsVisible then
+		return BOX_SIZE
 	end
 	return GetTrackedRowsTop() + BOX_SIZE + TRACKER_PADDING
 end
@@ -960,6 +970,9 @@ local function CenterLootTrackerWindow()
 	trackerWindow:RemoveAllAnchors()
 	trackerWindow:AddAnchor("CENTER", "UIParent", 0, 0)
 	SaveWindowPosition(trackerWindow)
+	restoreButton:RemoveAllAnchors()
+	restoreButton:AddAnchor("CENTER", "UIParent", 0, 0)
+	SaveRestoreButtonPosition(restoreButton)
 	UpdateRows()
 end
 	-- Hides the loot tracker window, saves position, closes picker, shows restore button.
@@ -1020,14 +1033,12 @@ local headerLabel = trackerWindow:CreateChildWidget("label", "lootTrackerHeaderL
 headerLabel:SetText("Loot Tracker")
 headerLabel:SetExtent(HEADER_TITLE_WIDTH, HEADER_HEIGHT)
 headerLabel.style:SetAlign(ALIGN_LEFT)
-	-- Starts moving the tracker window when header is dragged.
 headerLabel.style:SetFontSize(11)
 headerLabel.style:SetColor(0.95, 0.92, 0.82, 1)
 headerLabel.style:SetOutline(true)
 headerLabel:AddAnchor("TOPLEFT", trackerWindow, TRACKER_PADDING, TRACKER_TOP_PADDING + 2)
 SafeMethod(headerLabel, "EnableDrag", true)
 
-	-- Stops moving the tracker window and saves position on header drag stop.
 function headerLabel:OnDragStart()
 	trackerWindow:StartMoving()
 end
@@ -1038,7 +1049,6 @@ function headerLabel:OnDragStop()
 	SaveWindowPosition(trackerWindow)
 end
 headerLabel:SetHandler("OnDragStop", headerLabel.OnDragStop)
-	-- Toggles the tracker layout when rotate button is clicked.
 
 local ToggleTrackerLayout
 
@@ -1048,7 +1058,6 @@ rotateButton:SetText("R")
 rotateButton:SetExtent(ROTATE_BUTTON_WIDTH, 18)
 
 function rotateButton:OnClick()
-	-- Clears all tracked items when reset button is clicked.
 	ToggleTrackerLayout()
 end
 rotateButton:SetHandler("OnClick", rotateButton.OnClick)
@@ -1058,7 +1067,6 @@ resetButton:SetStyle("text_default")
 resetButton:SetText("C")
 resetButton:SetExtent(RESET_BUTTON_WIDTH, 18)
 
-	-- Hides the loot tracker window when hide button is clicked.
 function resetButton:OnClick()
 	ClearTrackedItems()
 end
@@ -1076,6 +1084,8 @@ hideWindowButton:SetHandler("OnClick", hideWindowButton.OnClick)
 
 SetTrackerHeaderControlsVisible = function(visible)
 	if trackerHeaderControlsVisible == visible then
+		SafeMethod(background, "SetVisible", visible)
+		SafeMethod(background, "Show", visible)
 		headerLabel:Show(visible)
 		rotateButton:Show(visible)
 		resetButton:Show(visible)
@@ -1088,6 +1098,8 @@ SetTrackerHeaderControlsVisible = function(visible)
 	local oldRowsTop = GetTrackedRowsTop()
 
 	trackerHeaderControlsVisible = visible
+	SafeMethod(background, "SetVisible", visible)
+	SafeMethod(background, "Show", visible)
 	headerLabel:Show(visible)
 	rotateButton:Show(visible)
 	resetButton:Show(visible)
@@ -1225,6 +1237,9 @@ local function AnchorTrackedRows()
 			if row.bg ~= nil then
 				row.bg:SetExtent(BOX_SIZE, BOX_SIZE)
 			end
+			if row.iconDrawable ~= nil then
+				row.iconDrawable:SetExtent(BOX_SIZE - 2, BOX_SIZE - 2)
+			end
 		end
 	end
 	-- Applies the current tracker layout: resizes window, anchors header and rows, and anchors picker if open.
@@ -1264,6 +1279,8 @@ for index = 1, TRACKED_SLOT_COUNT do
 		GetTrackedRowsTop()
 	)
 	SafeMethod(row, "Clickable", true)
+	SafeMethod(row, "EnableDrag", true)
+	SafeMethod(row, "RegisterForClicks", "RightButton")
 
 	local rowBackground = row:CreateColorDrawable(0.06, 0.06, 0.07, 0.64, "background")
 	rowBackground:AddAnchor("TOPLEFT", row, 0, 0)
@@ -1294,8 +1311,8 @@ for index = 1, TRACKED_SLOT_COUNT do
 	}
 
 	local rowIcon = row:CreateIconDrawable("artwork")
-	rowIcon:SetExtent(23, 23)
-	rowIcon:AddAnchor("CENTER", row, 0, -1)
+	rowIcon:SetExtent(BOX_SIZE - 2, BOX_SIZE - 2)
+	rowIcon:AddAnchor("TOPLEFT", row, 1, 1)
 	HideIconDrawable(rowIcon)
 	row.iconDrawable = rowIcon
 
@@ -1337,9 +1354,26 @@ for index = 1, TRACKED_SLOT_COUNT do
 		-- Handles click on a tracked row: right click removes item, left opens picker.
 
 	function row:OnClick(mouseButton)
+		if self.draggedTrackerWindow then
+			self.draggedTrackerWindow = false
+			return
+		end
 		HandleRowClick(self.index, mouseButton)
 	end
 	row:SetHandler("OnClick", row.OnClick)
+
+	function row:OnDragStart()
+		self.draggedTrackerWindow = true
+		trackerWindow:StartMoving()
+		return true
+	end
+	row:SetHandler("OnDragStart", row.OnDragStart)
+
+	function row:OnDragStop()
+		trackerWindow:StopMovingOrSizing()
+		SaveWindowPosition(trackerWindow)
+	end
+	row:SetHandler("OnDragStop", row.OnDragStop)
 
 	rowWidgets[index] = row
 end
