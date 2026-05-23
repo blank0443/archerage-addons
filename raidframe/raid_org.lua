@@ -111,6 +111,17 @@ local state = {
 	locked = false,
 	rangeValue = DEFAULT_RANGE_VALUE,
 	rangeInputText = DEFAULT_RANGE_VALUE,
+	hpAlertSettingsKey = ADDON_KEY .. "_hp_alert",
+	hpAlertWindowPositionKey = ADDON_KEY .. "_hp_alert_window_position",
+	hpAlertValue = "50",
+	hpAlertInputText = "50",
+	hpAlertEnabled = false,
+	hpAlertColor = {
+		bg = { 1.00, 0.92, 0.02, 0.96 },
+		border = { 1.00, 0.98, 0.25, 1.00 },
+		text = { 0.08, 0.07, 0.02, 1.00 },
+	},
+	normalNameColor = { 0.94, 0.95, 0.96, 1.00 },
 	activeMemberArea = "raid",
 	selectMode = false,
 	selectionFilterActive = false,
@@ -150,6 +161,9 @@ if previousRuntime ~= nil then
 	end
 	if previousRuntime.rangeWindow ~= nil then
 		previousRuntime.rangeWindow:Show(false)
+	end
+	if previousRuntime.hpAlertWindow ~= nil then
+		previousRuntime.hpAlertWindow:Show(false)
 	end
 	if previousRuntime.eventWindow ~= nil then
 		previousRuntime.eventWindow:Show(false)
@@ -546,6 +560,9 @@ local function HideMenu()
 	if runtime.rangeWindow ~= nil then
 		runtime.rangeWindow:Show(false)
 	end
+	if runtime.hpAlertWindow ~= nil then
+		runtime.hpAlertWindow:Show(false)
+	end
 end
 
 local UpdateAllMemberCells
@@ -927,6 +944,9 @@ local function ApplyModeButtons()
 			runtime.outOfRangeButton:SetText("Range Block")
 		end
 	end
+	if runtime.setHpAlertButtonText ~= nil then
+		runtime.setHpAlertButtonText()
+	end
 	if runtime.memberAreaButton ~= nil then
 		if state.activeMemberArea == "co_raid" then
 			runtime.memberAreaButton:SetText("Co-Raid")
@@ -1185,10 +1205,239 @@ local function ToggleRangeWindow()
 	rangeWindow:Show(true)
 end
 
+runtime.normalizeHpAlertInputText = function(text)
+	if text == nil then
+		return nil
+	end
+
+	local value = tostring(text):match("^%s*(.-)%s*$")
+	if value == "" or not string.match(value, "^%d+$") then
+		return nil
+	end
+
+	local numberValue = tonumber(value)
+	if numberValue == nil or numberValue < 1 then
+		return nil
+	end
+	if numberValue > 100 then
+		numberValue = 100
+	end
+	return tostring(math.floor(numberValue))
+end
+
+runtime.loadHpAlertSettings = function()
+	local saved = ADDON:LoadData(state.hpAlertSettingsKey)
+	if type(saved) == "table" then
+		state.hpAlertValue = runtime.normalizeHpAlertInputText(saved.value) or "50"
+		state.hpAlertInputText = state.hpAlertValue
+		local enabledText = string.lower(tostring(saved.enabled))
+		state.hpAlertEnabled = saved.enabled == true or saved.enabled == 1 or enabledText == "1" or enabledText == "true"
+		return
+	end
+
+	state.hpAlertValue = runtime.normalizeHpAlertInputText(saved) or "50"
+	state.hpAlertInputText = state.hpAlertValue
+	state.hpAlertEnabled = false
+end
+
+runtime.saveHpAlertSettings = function()
+	SaveData(state.hpAlertSettingsKey, { value = state.hpAlertValue, enabled = state.hpAlertEnabled })
+end
+
+runtime.setHpAlertButtonText = function()
+	if runtime.hpAlertButton ~= nil then
+		if state.hpAlertEnabled then
+			runtime.hpAlertButton:SetText("HP Alert: On")
+		else
+			runtime.hpAlertButton:SetText("HP Alert")
+		end
+	end
+	if runtime.hpAlertToggleButton ~= nil then
+		if state.hpAlertEnabled then
+			runtime.hpAlertToggleButton:SetText("On")
+		else
+			runtime.hpAlertToggleButton:SetText("Off")
+		end
+	end
+end
+
+runtime.createHpAlertWindow = function()
+	local hpAlertWindow = CreateEmptyWindow("raidOrgHpAlertWindow", "UIParent")
+	ApplyRaidOrgLayer(hpAlertWindow)
+	hpAlertWindow:SetExtent(RANGE_WINDOW_WIDTH, RANGE_WINDOW_HEIGHT + 28)
+	hpAlertWindow:EnableDrag(true)
+	hpAlertWindow:Clickable(true)
+	hpAlertWindow:Show(false)
+
+	local background = hpAlertWindow:CreateColorDrawable(0, 0, 0, 0.72, "background")
+	background:AddAnchor("TOPLEFT", hpAlertWindow, 0, 0)
+	background:AddAnchor("BOTTOMRIGHT", hpAlertWindow, 0, 0)
+
+	local title = hpAlertWindow:CreateChildWidget("label", "raidOrgHpAlertTitle", 0, true)
+	title:SetText("HP Alert %")
+	title:SetExtent(90, 20)
+	title.style:SetAlign(ALIGN_LEFT)
+	title.style:SetFontSize(12)
+	title.style:SetColor(0.95, 0.92, 0.82, 1)
+	title.style:SetOutline(true)
+	title:AddAnchor("TOPLEFT", hpAlertWindow, 8, 8)
+
+	local closeButton = hpAlertWindow:CreateChildWidget("button", "raidOrgHpAlertCloseButton", 0, true)
+	closeButton:SetStyle("text_default")
+	closeButton:SetText("X")
+	closeButton:SetExtent(24, 22)
+	closeButton:AddAnchor("TOPRIGHT", hpAlertWindow, -6, 5)
+	function closeButton:OnClick()
+		SaveWidgetPosition(hpAlertWindow, state.hpAlertWindowPositionKey)
+		hpAlertWindow:Show(false)
+	end
+	closeButton:SetHandler("OnClick", closeButton.OnClick)
+
+	local inputBackground = hpAlertWindow:CreateColorDrawable(1, 1, 1, 0.18, "background")
+	inputBackground:AddAnchor("TOPLEFT", hpAlertWindow, 8, 35)
+	inputBackground:SetExtent(RANGE_INPUT_WIDTH, RANGE_INPUT_HEIGHT)
+
+	local input = hpAlertWindow:CreateChildWidget("editbox", "raidOrgHpAlertInput", 0, true)
+	input:AddAnchor("TOPLEFT", hpAlertWindow, 12, 38)
+	input:SetExtent(RANGE_INPUT_WIDTH - 8, RANGE_INPUT_HEIGHT - 6)
+	SafeCall(input, "SetMaxTextLength", 3)
+	SafeCall(input, "SetInset", 4, 0, 4, 0)
+	SafeCall(input, "Enable", false)
+	DisableHitTesting(input)
+	if input.style ~= nil then
+		input.style:SetAlign(ALIGN_LEFT)
+		input.style:SetFontSize(13)
+		input.style:SetColor(0.05, 0.06, 0.05, 0)
+	end
+
+	local inputDisplay = hpAlertWindow:CreateChildWidget("label", "raidOrgHpAlertInputDisplay", 0, true)
+	inputDisplay:SetText("")
+	inputDisplay:SetExtent(RANGE_INPUT_WIDTH - 8, RANGE_INPUT_HEIGHT - 6)
+	inputDisplay.style:SetAlign(ALIGN_LEFT)
+	inputDisplay.style:SetFontSize(13)
+	inputDisplay.style:SetColor(0.05, 0.06, 0.05, 1)
+	inputDisplay:AddAnchor("TOPLEFT", hpAlertWindow, 12, 38)
+	DisableHitTesting(inputDisplay)
+	input.rangeDisplayLabel = inputDisplay
+
+	local function setDraftText(text)
+		state.hpAlertInputText = tostring(text or ""):match("^%s*(.-)%s*$")
+		SetRangeInputText(input, state.hpAlertInputText)
+	end
+
+	local function appendDigit(digit)
+		local digitText = tostring(digit or "")
+		if not string.match(digitText, "^%d$") then
+			return
+		end
+		local nextText = tostring(state.hpAlertInputText or "") .. digitText
+		if string.len(nextText) > 3 then
+			nextText = string.sub(nextText, -3)
+		end
+		setDraftText(nextText)
+	end
+
+	SetRangeInputText(input, state.hpAlertValue)
+	state.hpAlertInputText = tostring(state.hpAlertValue)
+
+	local toggleButton = hpAlertWindow:CreateChildWidget("button", "raidOrgHpAlertToggleButton", 0, true)
+	toggleButton:SetStyle("text_default")
+	toggleButton:SetExtent(64, 24)
+	toggleButton:AddAnchor("TOPRIGHT", hpAlertWindow, -8, 35)
+	function toggleButton:OnClick()
+		state.hpAlertEnabled = not state.hpAlertEnabled
+		runtime.saveHpAlertSettings()
+		runtime.setHpAlertButtonText()
+		UpdateMemberDistances()
+	end
+	toggleButton:SetHandler("OnClick", toggleButton.OnClick)
+	runtime.hpAlertToggleButton = toggleButton
+
+	local keyStartX = 8
+	local keyStartY = 66
+	local keyStepX = RANGE_DIGIT_BUTTON_WIDTH + RANGE_DIGIT_BUTTON_GAP
+	local keyStepY = RANGE_DIGIT_BUTTON_HEIGHT + RANGE_DIGIT_BUTTON_GAP
+	local keyRows = {
+		{ "1", "2", "3", "C" },
+		{ "4", "5", "6", "<" },
+		{ "7", "8", "9", "0" },
+	}
+	for rowIndex, row in ipairs(keyRows) do
+		for columnIndex, keyText in ipairs(row) do
+			local x = keyStartX + ((columnIndex - 1) * keyStepX)
+			local y = keyStartY + ((rowIndex - 1) * keyStepY)
+			CreateRangeKeyButton(hpAlertWindow, input, "raidOrgHpAlertKey" .. tostring(rowIndex) .. tostring(columnIndex), keyText, x, y, function()
+				if keyText == "C" then
+					setDraftText("")
+				elseif keyText == "<" then
+					setDraftText(DropLastCharacter(state.hpAlertInputText))
+				else
+					appendDigit(keyText)
+				end
+			end)
+		end
+	end
+
+	local applyButton = hpAlertWindow:CreateChildWidget("button", "raidOrgHpAlertApplyButton", 0, true)
+	applyButton:SetStyle("text_default")
+	applyButton:SetText("Save")
+	applyButton:SetExtent(64, 24)
+	applyButton:AddAnchor("TOPRIGHT", hpAlertWindow, -8, 150)
+	function applyButton:OnClick()
+		local value = runtime.normalizeHpAlertInputText(state.hpAlertInputText) or "50"
+		state.hpAlertValue = value
+		state.hpAlertInputText = value
+		SetRangeInputText(input, value)
+		runtime.saveHpAlertSettings()
+		SaveWidgetPosition(hpAlertWindow, state.hpAlertWindowPositionKey)
+		UpdateMemberDistances()
+		hpAlertWindow:Show(false)
+	end
+	applyButton:SetHandler("OnClick", applyButton.OnClick)
+
+	function hpAlertWindow:OnDragStart()
+		self:StartMoving()
+	end
+	hpAlertWindow:SetHandler("OnDragStart", hpAlertWindow.OnDragStart)
+
+	function hpAlertWindow:OnDragStop()
+		self:StopMovingOrSizing()
+		SaveWidgetPosition(self, state.hpAlertWindowPositionKey)
+	end
+	hpAlertWindow:SetHandler("OnDragStop", hpAlertWindow.OnDragStop)
+
+	runtime.hpAlertWindow = hpAlertWindow
+	runtime.hpAlertInput = input
+	runtime.setHpAlertButtonText()
+	return hpAlertWindow
+end
+
+runtime.toggleHpAlertWindow = function()
+	local hpAlertWindow = runtime.hpAlertWindow
+	if hpAlertWindow == nil then
+		return
+	end
+
+	if hpAlertWindow:IsVisible() then
+		SaveWidgetPosition(hpAlertWindow, state.hpAlertWindowPositionKey)
+		hpAlertWindow:Show(false)
+		return
+	end
+
+	local x, y = LoadPosition(state.hpAlertWindowPositionKey, 590, 390)
+	SetWidgetPoint(hpAlertWindow, x, y)
+	if runtime.hpAlertInput ~= nil then
+		state.hpAlertInputText = tostring(state.hpAlertValue)
+		SetRangeInputText(runtime.hpAlertInput, state.hpAlertValue)
+	end
+	runtime.setHpAlertButtonText()
+	hpAlertWindow:Show(true)
+end
+
 local function CreateMenuWindow()
 	local menuWindow = CreateEmptyWindow("raidOrgMenuWindow", "UIParent")
 	ApplyRaidOrgLayer(menuWindow)
-	menuWindow:SetExtent(MENU_WIDTH, (MENU_BUTTON_HEIGHT * 6) + 10)
+	menuWindow:SetExtent(MENU_WIDTH, (MENU_BUTTON_HEIGHT * 7) + 10)
 	menuWindow:EnableDrag(true)
 	menuWindow:Show(false)
 	SafeCall(menuWindow, "Clickable", true)
@@ -1209,18 +1458,22 @@ local function CreateMenuWindow()
 		ToggleOutOfRangeMode()
 	end)
 
-	runtime.lockButton = CreateMenuButton(menuWindow, "raidOrgLockButton", "Lock", 5 + (MENU_BUTTON_HEIGHT * 3), function()
+	runtime.hpAlertButton = CreateMenuButton(menuWindow, "raidOrgHpAlertButton", "HP Alert", 5 + (MENU_BUTTON_HEIGHT * 3), function()
+		runtime.toggleHpAlertWindow()
+	end)
+
+	runtime.lockButton = CreateMenuButton(menuWindow, "raidOrgLockButton", "Lock", 5 + (MENU_BUTTON_HEIGHT * 4), function()
 		state.locked = not state.locked
 		state.controlsHidden = true
 		ApplyLockState()
 		UpdateControlHover()
 	end)
 
-	runtime.spacingMinusButton = CreateMenuButton(menuWindow, "raidOrgSpacingMinusButton", "Spacing -", 5 + (MENU_BUTTON_HEIGHT * 4), function()
+	runtime.spacingMinusButton = CreateMenuButton(menuWindow, "raidOrgSpacingMinusButton", "Spacing -", 5 + (MENU_BUTTON_HEIGHT * 5), function()
 		AdjustGroupRowGap(-MEMBER_GROUP_ROW_GAP_STEP)
 	end)
 
-	runtime.spacingPlusButton = CreateMenuButton(menuWindow, "raidOrgSpacingPlusButton", "Spacing +", 5 + (MENU_BUTTON_HEIGHT * 5), function()
+	runtime.spacingPlusButton = CreateMenuButton(menuWindow, "raidOrgSpacingPlusButton", "Spacing +", 5 + (MENU_BUTTON_HEIGHT * 6), function()
 		AdjustGroupRowGap(MEMBER_GROUP_ROW_GAP_STEP)
 	end)
 
@@ -1614,6 +1867,53 @@ local function SetDrawableColor(drawable, r, g, b, a)
 	end
 end
 
+runtime.isMemberHpAlertActive = function(cell)
+	if cell == nil or not state.hpAlertEnabled then
+		return false
+	end
+
+	local threshold = tonumber(state.hpAlertValue)
+	local percent = tonumber(cell.memberHealthPercent)
+	if threshold == nil or percent == nil then
+		return false
+	end
+	return (percent * 100) < threshold
+end
+
+runtime.setCellNameColor = function(cell, color)
+	if cell ~= nil and cell.nameLabel ~= nil and cell.nameLabel.style ~= nil then
+		cell.nameLabel.style:SetColor(color[1], color[2], color[3], color[4])
+	end
+end
+
+runtime.applyCellHpAlertVisual = function(cell)
+	if cell == nil then
+		return
+	end
+
+	SetDrawableVisible(cell.background, true)
+	SetDrawableColor(cell.background, state.hpAlertColor.bg[1], state.hpAlertColor.bg[2], state.hpAlertColor.bg[3], state.hpAlertColor.bg[4])
+	local percent = cell.memberHealthPercent or 1
+	if percent < 0 then
+		percent = 0
+	elseif percent > 1 then
+		percent = 1
+	end
+	local width = math.floor((cell:GetWidth() * percent) + 0.5)
+	if width < 1 and percent > 0 then
+		width = 1
+	end
+	cell.background:SetExtent(width, cell:GetHeight())
+	runtime.setCellNameColor(cell, state.hpAlertColor.text)
+	if cell.distanceLabel ~= nil and cell.distanceLabel.style ~= nil then
+		cell.distanceLabel.style:SetColor(state.hpAlertColor.text[1], state.hpAlertColor.text[2], state.hpAlertColor.text[3], state.hpAlertColor.text[4])
+	end
+	SetDrawableColor(cell.borderTop, state.hpAlertColor.border[1], state.hpAlertColor.border[2], state.hpAlertColor.border[3], state.locked and 0 or state.hpAlertColor.border[4])
+	SetDrawableColor(cell.borderBottom, state.hpAlertColor.border[1], state.hpAlertColor.border[2], state.hpAlertColor.border[3], state.locked and 0 or state.hpAlertColor.border[4])
+	SetDrawableColor(cell.borderLeft, state.hpAlertColor.border[1], state.hpAlertColor.border[2], state.hpAlertColor.border[3], state.locked and 0 or state.hpAlertColor.border[4])
+	SetDrawableColor(cell.borderRight, state.hpAlertColor.border[1], state.hpAlertColor.border[2], state.hpAlertColor.border[3], state.locked and 0 or state.hpAlertColor.border[4])
+end
+
 local function GetCellSelectionKey(cell)
 	if cell == nil or cell.memberName == nil then
 		return nil
@@ -1678,6 +1978,11 @@ local function UpdateCellHealthFill(cell)
 end
 
 local function SetDistanceLabelColor(cell, distance)
+	if cell.memberHpAlertActive then
+		cell.distanceLabel.style:SetColor(state.hpAlertColor.text[1], state.hpAlertColor.text[2], state.hpAlertColor.text[3], state.hpAlertColor.text[4])
+		return
+	end
+
 	if state.selectMode then
 		cell.distanceLabel.style:SetColor(0.74, 0.76, 0.78, 1)
 		return
@@ -1780,6 +2085,9 @@ local function ApplyCellRoleVisual(cell)
 		return
 	end
 
+	cell.memberHpAlertActive = false
+	runtime.setCellNameColor(cell, state.normalNameColor)
+
 	if state.selectMode then
 		ApplyCellSelectModeVisual(cell)
 		return
@@ -1787,6 +2095,12 @@ local function ApplyCellRoleVisual(cell)
 
 	if IsCellSelectionFiltered(cell) then
 		ApplyCellSelectionFilteredVisual(cell)
+		return
+	end
+
+	cell.memberHpAlertActive = runtime.isMemberHpAlertActive(cell)
+	if cell.memberHpAlertActive then
+		runtime.applyCellHpAlertVisual(cell)
 		return
 	end
 
@@ -1836,6 +2150,7 @@ local function ApplyCellState(cell, name, distance, roleKey)
 		cell.memberName = nil
 		cell.memberDistance = nil
 		cell.memberHealthPercent = nil
+		cell.memberHpAlertActive = nil
 		cell.memberRoleKey = nil
 		cell.memberOutOfRange = nil
 		cell.nameLabel:SetText("")
@@ -2028,14 +2343,18 @@ UpdateMemberDistances = function()
 			local distance = TryGetUnitDistance(cell.memberToken, cell.memberName)
 			local roleKey = GetMemberRoleKey(state.activeMemberArea, cell.sourceFlatIndex, cell.memberToken, cell.memberName)
 			local wasOutOfRange = cell.memberOutOfRange
+			local wasHpAlertActive = cell.memberHpAlertActive
 			cell.memberDistance = distance
 			cell.memberOutOfRange = IsMemberDistanceOutOfRange(distance)
 			cell.memberHealthPercent = TryGetUnitHealthPercent(cell.memberToken)
+			cell.memberHpAlertActive = runtime.isMemberHpAlertActive(cell)
 			if roleKey ~= nil and roleKey ~= cell.memberRoleKey then
 				cell.memberRoleKey = roleKey
 				state.memberRoleByName[string.lower(cell.memberName)] = roleKey
 				ApplyCellRoleVisual(cell)
 			elseif wasOutOfRange ~= cell.memberOutOfRange then
+				ApplyCellRoleVisual(cell)
+			elseif wasHpAlertActive ~= cell.memberHpAlertActive then
 				ApplyCellRoleVisual(cell)
 			else
 				UpdateCellHealthFill(cell)
@@ -2545,6 +2864,7 @@ end
 local function CreateRaidWindow()
 	state.rangeValue = LoadRangeValue()
 	state.memberGroupRowGap = LoadGroupRowGap()
+	runtime.loadHpAlertSettings()
 
 	local width, height = LoadSize()
 	local x, y = LoadPosition(WINDOW_POSITION_KEY, 520, 320)
@@ -2778,6 +3098,7 @@ local function CreateRaidWindow()
 
 	CreateMemberCells(raidWindow)
 	CreateRangeWindow()
+	runtime.createHpAlertWindow()
 	CreateMenuWindow()
 	ApplyModeButtons()
 	return raidWindow
