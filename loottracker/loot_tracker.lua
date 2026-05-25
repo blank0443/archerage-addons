@@ -37,6 +37,9 @@ if previousRuntime ~= nil then
 	if previousRuntime.chatCommandListener ~= nil then
 		previousRuntime.chatCommandListener:Show(false)
 	end
+	if previousRuntime.SetResizeHandlesVisible ~= nil then
+		previousRuntime:SetResizeHandlesVisible(false)
+	end
 end
 
 local runtime = {
@@ -45,6 +48,8 @@ local runtime = {
 	pickerWindow = nil,
 	restoreButton = nil,
 	chatCommandListener = nil,
+	resizeHandles = {},
+	trackerScale = 1,
 }
 _G.__LOOT_TRACKER_RUNTIME = runtime
 
@@ -75,9 +80,6 @@ local BOX_SIZE = 40
 local BOX_GAP = 6
 local TRACKER_ROW_TOP_GAP = 3
 local BOXES_TOP = TRACKER_TOP_PADDING + HEADER_HEIGHT + TRACKER_ROW_TOP_GAP
-local VERTICAL_BOXES_TOP = TRACKER_TOP_PADDING + HEADER_HEIGHT + HEADER_BUTTON_GAP + (HEADER_BUTTON_HEIGHT * 3)
-	+ (HEADER_BUTTON_GAP * 3)
-	+ TRACKER_ROW_TOP_GAP
 
 local PICKER_WIDTH = 330
 local PICKER_HEIGHT = 328
@@ -557,27 +559,140 @@ local function LoadTrackerLayout()
 	return LAYOUT_HORIZONTAL
 end
 
-local function GetTrackedRowsSpan()
+function runtime:SaveSlotCount()
+	pcall(function()
+		ADDON:ClearData("lootTrackerSlotCount")
+		ADDON:SaveData("lootTrackerSlotCount", {
+			count = TRACKED_SLOT_COUNT,
+		})
+	end)
+end
+
+function runtime:LoadSlotCount()
+	local ok, data = pcall(function()
+		return ADDON:LoadData("lootTrackerSlotCount")
+	end)
+	if not ok then
+		return
+	end
+
+	local count = data
+	if type(data) == "table" then
+		count = data.count
+	end
+	count = math.floor(tonumber(count) or TRACKED_SLOT_COUNT)
+	if count < 1 then
+		count = 1
+	elseif count > 20 then
+		count = 20
+	end
+	TRACKED_SLOT_COUNT = count
+end
+
+function runtime:ClampScale(scale)
+	scale = tonumber(scale) or 1
+	if scale < 0.85 then
+		return 0.85
+	end
+	if scale > 1.35 then
+		return 1.35
+	end
+	return scale
+end
+
+function runtime:Scale(value)
+	local number = tonumber(value) or 0
+	local scaled = math.floor((number * self:ClampScale(self.trackerScale)) + 0.5)
+	if scaled < 1 and number > 0 then
+		return 1
+	end
+	return scaled
+end
+
+function runtime:ScaleAt(value, scale)
+	local number = tonumber(value) or 0
+	local scaled = math.floor((number * self:ClampScale(scale)) + 0.5)
+	if scaled < 1 and number > 0 then
+		return 1
+	end
+	return scaled
+end
+
+function runtime:SaveWindowScale()
+	pcall(function()
+		ADDON:ClearData("lootTrackerWindowScale")
+		ADDON:SaveData("lootTrackerWindowScale", {
+			scale = self:ClampScale(self.trackerScale),
+		})
+	end)
+end
+
+function runtime:LoadWindowScale()
+	local ok, data = pcall(function()
+		return ADDON:LoadData("lootTrackerWindowScale")
+	end)
+	if not ok then
+		return
+	end
+
+	local scale = data
+	if type(data) == "table" then
+		scale = data.scale
+	end
+	self.trackerScale = self:ClampScale(scale)
+end
+
+function runtime:GetBaseRowsSpan()
 	return (TRACKED_SLOT_COUNT * BOX_SIZE) + ((TRACKED_SLOT_COUNT - 1) * BOX_GAP)
 end
 
-local function GetTrackerWindowWidth()
+function runtime:GetBaseWindowWidth()
 	if not trackerHeaderControlsVisible then
 		if trackerLayout == LAYOUT_VERTICAL then
 			return BOX_SIZE
 		end
-		return GetTrackedRowsSpan()
+		return self:GetBaseRowsSpan()
 	end
 
 	if trackerLayout == LAYOUT_VERTICAL then
-		return HEADER_TITLE_WIDTH + (TRACKER_PADDING * 2)
+		return BOX_SIZE + HEADER_BUTTON_GAP + HIDE_WINDOW_BUTTON_WIDTH
 	end
-	return GetTrackedRowsSpan() + (TRACKER_PADDING * 2)
+	return math.max(
+		self:GetBaseRowsSpan(),
+		HEADER_TITLE_WIDTH
+			+ ROTATE_BUTTON_WIDTH
+			+ RESET_BUTTON_WIDTH
+			+ RESET_BUTTON_WIDTH
+			+ RESET_BUTTON_WIDTH
+			+ HIDE_WINDOW_BUTTON_WIDTH
+			+ (HEADER_BUTTON_GAP * 5)
+	) + (TRACKER_PADDING * 2)
+end
+
+function runtime:GetBaseWindowHeight()
+	if trackerLayout == LAYOUT_VERTICAL then
+		if not trackerHeaderControlsVisible then
+			return self:GetBaseRowsSpan()
+		end
+		return math.max(self:GetBaseRowsSpan(), (HEADER_BUTTON_HEIGHT * 5) + (HEADER_BUTTON_GAP * 4))
+	end
+	if not trackerHeaderControlsVisible then
+		return BOX_SIZE
+	end
+	return BOXES_TOP + BOX_SIZE + TRACKER_PADDING
+end
+
+local function GetTrackedRowsSpan()
+	return runtime:Scale(runtime:GetBaseRowsSpan())
+end
+
+local function GetTrackerWindowWidth()
+	return runtime:Scale(runtime:GetBaseWindowWidth())
 end
 
 local function GetTrackedRowsLeft()
 	if trackerLayout == LAYOUT_VERTICAL then
-		return math.floor((GetTrackerWindowWidth() - BOX_SIZE) / 2)
+		return 0
 	end
 	return math.floor((GetTrackerWindowWidth() - GetTrackedRowsSpan()) / 2)
 end
@@ -588,22 +703,13 @@ local function GetTrackedRowsTop()
 	end
 
 	if trackerLayout == LAYOUT_VERTICAL then
-		return VERTICAL_BOXES_TOP
+		return 0
 	end
-	return BOXES_TOP
+	return runtime:Scale(BOXES_TOP)
 end
 
 local function GetTrackerWindowHeight()
-	if trackerLayout == LAYOUT_VERTICAL then
-		if not trackerHeaderControlsVisible then
-			return GetTrackedRowsSpan()
-		end
-		return GetTrackedRowsTop() + GetTrackedRowsSpan() + TRACKER_PADDING
-	end
-	if not trackerHeaderControlsVisible then
-		return BOX_SIZE
-	end
-	return GetTrackedRowsTop() + BOX_SIZE + TRACKER_PADDING
+	return runtime:Scale(runtime:GetBaseWindowHeight())
 end
 
 local function CompactName(value)
@@ -923,6 +1029,8 @@ UpdateRows = function()
 	end
 end
 
+runtime:LoadSlotCount()
+runtime:LoadWindowScale()
 LoadTrackedItems()
 trackerLayout = LoadTrackerLayout()
 
@@ -960,6 +1068,11 @@ end
 
 local function CenterLootTrackerWindow()
 	ClosePicker()
+	if runtime.ChangeSlotCount ~= nil then
+		runtime:ChangeSlotCount(5 - TRACKED_SLOT_COUNT)
+	end
+	runtime.trackerScale = 1
+	runtime:SaveWindowScale()
 	restoreButton:Show(false)
 	trackerWindow:Show(true)
 	if SetTrackerHeaderControlsVisible ~= nil then
@@ -970,6 +1083,9 @@ local function CenterLootTrackerWindow()
 	trackerWindow:RemoveAllAnchors()
 	trackerWindow:AddAnchor("CENTER", "UIParent", 0, 0)
 	SaveWindowPosition(trackerWindow)
+	if runtime.PositionResizeHandles ~= nil then
+		runtime:PositionResizeHandles()
+	end
 	restoreButton:RemoveAllAnchors()
 	restoreButton:AddAnchor("CENTER", "UIParent", 0, 0)
 	SaveRestoreButtonPosition(restoreButton)
@@ -980,6 +1096,9 @@ end
 local function HideLootTrackerWindow()
 	if SetTrackerHeaderControlsVisible ~= nil then
 		SetTrackerHeaderControlsVisible(true)
+	end
+	if runtime.SetResizeHandlesVisible ~= nil then
+		runtime:SetResizeHandlesVisible(false)
 	end
 	SaveWindowPosition(trackerWindow)
 	ClosePicker()
@@ -1000,6 +1119,9 @@ local function ShowLootTrackerWindow()
 	trackerWindow:Show(true)
 	if SetTrackerHeaderControlsVisible ~= nil then
 		SetTrackerHeaderControlsVisible(true)
+	end
+	if runtime.SetResizeHandlesVisible ~= nil then
+		runtime:SetResizeHandlesVisible(true)
 	end
 	MarkInventoryDirty()
 	ApplyTrackerLayout()
@@ -1047,6 +1169,9 @@ headerLabel:SetHandler("OnDragStart", headerLabel.OnDragStart)
 function headerLabel:OnDragStop()
 	trackerWindow:StopMovingOrSizing()
 	SaveWindowPosition(trackerWindow)
+	if runtime.PositionResizeHandles ~= nil then
+		runtime:PositionResizeHandles()
+	end
 end
 headerLabel:SetHandler("OnDragStop", headerLabel.OnDragStop)
 
@@ -1072,6 +1197,26 @@ function resetButton:OnClick()
 end
 resetButton:SetHandler("OnClick", resetButton.OnClick)
 
+runtime.addSlotButton = trackerWindow:CreateChildWidget("button", "lootTrackerAddSlotButton", 0, true)
+runtime.addSlotButton:SetStyle("text_default")
+runtime.addSlotButton:SetText("+")
+runtime.addSlotButton:SetExtent(RESET_BUTTON_WIDTH, 18)
+
+function runtime.addSlotButton:OnClick()
+	runtime:ChangeSlotCount(1)
+end
+runtime.addSlotButton:SetHandler("OnClick", runtime.addSlotButton.OnClick)
+
+runtime.removeSlotButton = trackerWindow:CreateChildWidget("button", "lootTrackerRemoveSlotButton", 0, true)
+runtime.removeSlotButton:SetStyle("text_default")
+runtime.removeSlotButton:SetText("-")
+runtime.removeSlotButton:SetExtent(RESET_BUTTON_WIDTH, 18)
+
+function runtime.removeSlotButton:OnClick()
+	runtime:ChangeSlotCount(-1)
+end
+runtime.removeSlotButton:SetHandler("OnClick", runtime.removeSlotButton.OnClick)
+
 local hideWindowButton = trackerWindow:CreateChildWidget("button", "lootTrackerHideWindowButton", 0, true)
 hideWindowButton:SetStyle("text_default")
 hideWindowButton:SetText("X")
@@ -1086,10 +1231,15 @@ SetTrackerHeaderControlsVisible = function(visible)
 	if trackerHeaderControlsVisible == visible then
 		SafeMethod(background, "SetVisible", visible)
 		SafeMethod(background, "Show", visible)
-		headerLabel:Show(visible)
+		headerLabel:Show(visible and trackerLayout ~= LAYOUT_VERTICAL)
 		rotateButton:Show(visible)
 		resetButton:Show(visible)
+		runtime.addSlotButton:Show(visible)
+		runtime.removeSlotButton:Show(visible)
 		hideWindowButton:Show(visible)
+		if runtime.SetResizeHandlesVisible ~= nil then
+			runtime:SetResizeHandlesVisible(visible)
+		end
 		return
 	end
 
@@ -1100,12 +1250,17 @@ SetTrackerHeaderControlsVisible = function(visible)
 	trackerHeaderControlsVisible = visible
 	SafeMethod(background, "SetVisible", visible)
 	SafeMethod(background, "Show", visible)
-	headerLabel:Show(visible)
+	headerLabel:Show(visible and trackerLayout ~= LAYOUT_VERTICAL)
 	rotateButton:Show(visible)
 	resetButton:Show(visible)
+	runtime.addSlotButton:Show(visible)
+	runtime.removeSlotButton:Show(visible)
 	hideWindowButton:Show(visible)
 	if ApplyTrackerLayout ~= nil then
 		ApplyTrackerLayout()
+	end
+	if runtime.SetResizeHandlesVisible ~= nil then
+		runtime:SetResizeHandlesVisible(visible)
 	end
 
 	if oldX ~= nil and oldY ~= nil then
@@ -1122,6 +1277,9 @@ local function ShowTrackerHeaderControls()
 end
 
 local function HideTrackerHeaderControls()
+	if runtime.IsResizing ~= nil and runtime:IsResizing() then
+		return
+	end
 	SetTrackerHeaderControlsVisible(false)
 end
 
@@ -1142,62 +1300,118 @@ headerLabel:SetHandler("OnEnter", headerLabel.OnEnter)
 
 rotateButton:SetHandler("OnEnter", ShowTrackerHeaderControls)
 resetButton:SetHandler("OnEnter", ShowTrackerHeaderControls)
+runtime.addSlotButton:SetHandler("OnEnter", ShowTrackerHeaderControls)
+runtime.removeSlotButton:SetHandler("OnEnter", ShowTrackerHeaderControls)
 hideWindowButton:SetHandler("OnEnter", ShowTrackerHeaderControls)
 
 local function AnchorHeaderControls()
-	-- Anchors the header label and control buttons (rotate, reset, hide) based on current tracker layout (horizontal or vertical).
+	-- Anchors the header label and control buttons based on current tracker layout.
 	headerLabel:RemoveAllAnchors()
-	headerLabel:SetExtent(HEADER_TITLE_WIDTH, HEADER_HEIGHT)
+	headerLabel:SetExtent(runtime:Scale(HEADER_TITLE_WIDTH), runtime:Scale(HEADER_HEIGHT))
 	headerLabel.style:SetAlign(ALIGN_LEFT)
+	headerLabel.style:SetFontSize(runtime:Scale(11))
+	rotateButton:SetExtent(runtime:Scale(ROTATE_BUTTON_WIDTH), runtime:Scale(HEADER_BUTTON_HEIGHT))
+	resetButton:SetExtent(runtime:Scale(RESET_BUTTON_WIDTH), runtime:Scale(HEADER_BUTTON_HEIGHT))
+	runtime.addSlotButton:SetExtent(runtime:Scale(RESET_BUTTON_WIDTH), runtime:Scale(HEADER_BUTTON_HEIGHT))
+	runtime.removeSlotButton:SetExtent(runtime:Scale(RESET_BUTTON_WIDTH), runtime:Scale(HEADER_BUTTON_HEIGHT))
+	hideWindowButton:SetExtent(runtime:Scale(HIDE_WINDOW_BUTTON_WIDTH), runtime:Scale(HEADER_BUTTON_HEIGHT))
 
 	if trackerLayout == LAYOUT_VERTICAL then
-		headerLabel:AddAnchor("TOP", trackerWindow, 0, TRACKER_TOP_PADDING + 2)
-		headerLabel.style:SetAlign(ALIGN_CENTER)
+		local railLeft = runtime:Scale(BOX_SIZE + HEADER_BUTTON_GAP)
+		local narrowLeft = railLeft + math.floor((runtime:Scale(HIDE_WINDOW_BUTTON_WIDTH) - runtime:Scale(RESET_BUTTON_WIDTH)) / 2)
+		headerLabel:Show(false)
 
 		rotateButton:RemoveAllAnchors()
-		rotateButton:AddAnchor("TOP", trackerWindow, 0, TRACKER_TOP_PADDING + HEADER_HEIGHT + HEADER_BUTTON_GAP)
+		rotateButton:AddAnchor("TOPLEFT", trackerWindow, narrowLeft, 0)
 
 		resetButton:RemoveAllAnchors()
 		resetButton:AddAnchor(
-			"TOP",
+			"TOPLEFT",
 			trackerWindow,
-			0,
-			TRACKER_TOP_PADDING + HEADER_HEIGHT + HEADER_BUTTON_GAP + HEADER_BUTTON_HEIGHT + HEADER_BUTTON_GAP
+			narrowLeft,
+			runtime:Scale(HEADER_BUTTON_HEIGHT + HEADER_BUTTON_GAP)
+		)
+
+		runtime.addSlotButton:RemoveAllAnchors()
+		runtime.addSlotButton:AddAnchor(
+			"TOPLEFT",
+			trackerWindow,
+			narrowLeft,
+			runtime:Scale((HEADER_BUTTON_HEIGHT * 2) + (HEADER_BUTTON_GAP * 2))
+		)
+
+		runtime.removeSlotButton:RemoveAllAnchors()
+		runtime.removeSlotButton:AddAnchor(
+			"TOPLEFT",
+			trackerWindow,
+			narrowLeft,
+			runtime:Scale((HEADER_BUTTON_HEIGHT * 3) + (HEADER_BUTTON_GAP * 3))
 		)
 
 		hideWindowButton:RemoveAllAnchors()
 		hideWindowButton:AddAnchor(
-			"TOP",
+			"TOPLEFT",
 			trackerWindow,
-			0,
-			TRACKER_TOP_PADDING + HEADER_HEIGHT + HEADER_BUTTON_GAP + (HEADER_BUTTON_HEIGHT * 2) + (HEADER_BUTTON_GAP * 2)
+			railLeft,
+			runtime:Scale((HEADER_BUTTON_HEIGHT * 4) + (HEADER_BUTTON_GAP * 4))
 		)
 		return
 	end
 
-	headerLabel:AddAnchor("TOPLEFT", trackerWindow, TRACKER_PADDING, TRACKER_TOP_PADDING + 2)
+	headerLabel:Show(trackerHeaderControlsVisible)
+	headerLabel:AddAnchor("TOPLEFT", trackerWindow, runtime:Scale(TRACKER_PADDING), runtime:Scale(TRACKER_TOP_PADDING + 2))
 
 	hideWindowButton:RemoveAllAnchors()
-	hideWindowButton:AddAnchor("TOPRIGHT", trackerWindow, -TRACKER_PADDING, TRACKER_TOP_PADDING + 1)
+	hideWindowButton:AddAnchor("TOPRIGHT", trackerWindow, -runtime:Scale(TRACKER_PADDING), runtime:Scale(TRACKER_TOP_PADDING + 1))
+
+	runtime.removeSlotButton:RemoveAllAnchors()
+	runtime.removeSlotButton:AddAnchor(
+		"TOPRIGHT",
+		trackerWindow,
+		-runtime:Scale(TRACKER_PADDING + HIDE_WINDOW_BUTTON_WIDTH + HEADER_BUTTON_GAP),
+		runtime:Scale(TRACKER_TOP_PADDING + 1)
+	)
+
+	runtime.addSlotButton:RemoveAllAnchors()
+	runtime.addSlotButton:AddAnchor(
+		"TOPRIGHT",
+		trackerWindow,
+		-runtime:Scale(TRACKER_PADDING + HIDE_WINDOW_BUTTON_WIDTH + HEADER_BUTTON_GAP + RESET_BUTTON_WIDTH + HEADER_BUTTON_GAP),
+		runtime:Scale(TRACKER_TOP_PADDING + 1)
+	)
 
 	resetButton:RemoveAllAnchors()
 	resetButton:AddAnchor(
 		"TOPRIGHT",
 		trackerWindow,
-		-TRACKER_PADDING - HIDE_WINDOW_BUTTON_WIDTH - HEADER_BUTTON_GAP,
-		TRACKER_TOP_PADDING + 1
+		-runtime:Scale(
+			TRACKER_PADDING
+				+ HIDE_WINDOW_BUTTON_WIDTH
+				+ HEADER_BUTTON_GAP
+				+ RESET_BUTTON_WIDTH
+				+ HEADER_BUTTON_GAP
+				+ RESET_BUTTON_WIDTH
+				+ HEADER_BUTTON_GAP
+		),
+		runtime:Scale(TRACKER_TOP_PADDING + 1)
 	)
 
 	rotateButton:RemoveAllAnchors()
 	rotateButton:AddAnchor(
 		"TOPRIGHT",
 		trackerWindow,
-		-TRACKER_PADDING
-			- HIDE_WINDOW_BUTTON_WIDTH
-			- HEADER_BUTTON_GAP
-			- RESET_BUTTON_WIDTH
-			- HEADER_BUTTON_GAP,
-		TRACKER_TOP_PADDING + 1
+		-runtime:Scale(
+			TRACKER_PADDING
+				+ HIDE_WINDOW_BUTTON_WIDTH
+				+ HEADER_BUTTON_GAP
+				+ RESET_BUTTON_WIDTH
+				+ HEADER_BUTTON_GAP
+				+ RESET_BUTTON_WIDTH
+				+ HEADER_BUTTON_GAP
+				+ RESET_BUTTON_WIDTH
+				+ HEADER_BUTTON_GAP
+		),
+		runtime:Scale(TRACKER_TOP_PADDING + 1)
 	)
 
 end
@@ -1220,25 +1434,63 @@ end
 	-- Anchors all tracked row widgets according to current layout (horizontal row or vertical column).
 
 local function AnchorTrackedRows()
-	for index = 1, TRACKED_SLOT_COUNT do
-		local row = rowWidgets[index]
-		if row ~= nil then
-			local offsetX = GetTrackedRowsLeft() + ((index - 1) * (BOX_SIZE + BOX_GAP))
+	for index, row in pairs(rowWidgets) do
+		if row ~= nil and index > TRACKED_SLOT_COUNT then
+			row:Show(false)
+		elseif row ~= nil then
+			row:Show(true)
+			local boxSize = runtime:Scale(BOX_SIZE)
+			local boxGap = runtime:Scale(BOX_GAP)
+			local borderSize = runtime:Scale(1)
+			local iconInset = runtime:Scale(1)
+			local iconSize = boxSize - (iconInset * 2)
+			if iconSize < 1 then
+				iconSize = 1
+			end
+			local offsetX = GetTrackedRowsLeft() + ((index - 1) * (boxSize + boxGap))
 			local offsetY = GetTrackedRowsTop()
 
 			if trackerLayout == LAYOUT_VERTICAL then
 				offsetX = GetTrackedRowsLeft()
-				offsetY = GetTrackedRowsTop() + ((index - 1) * (BOX_SIZE + BOX_GAP))
+				offsetY = GetTrackedRowsTop() + ((index - 1) * (boxSize + boxGap))
 			end
 
 			row:RemoveAllAnchors()
 			row:AddAnchor("TOPLEFT", trackerWindow, offsetX, offsetY)
-			row:SetExtent(BOX_SIZE, BOX_SIZE)
+			row:SetExtent(boxSize, boxSize)
 			if row.bg ~= nil then
-				row.bg:SetExtent(BOX_SIZE, BOX_SIZE)
+				row.bg:SetExtent(boxSize, boxSize)
 			end
 			if row.iconDrawable ~= nil then
-				row.iconDrawable:SetExtent(BOX_SIZE - 2, BOX_SIZE - 2)
+				row.iconDrawable:RemoveAllAnchors()
+				row.iconDrawable:SetExtent(iconSize, iconSize)
+				row.iconDrawable:AddAnchor("TOPLEFT", row, iconInset, iconInset)
+			end
+			if row.hoverBorder ~= nil then
+				if row.hoverBorder[1] ~= nil then
+					row.hoverBorder[1]:SetExtent(boxSize, borderSize)
+				end
+				if row.hoverBorder[2] ~= nil then
+					row.hoverBorder[2]:SetExtent(boxSize, borderSize)
+				end
+				if row.hoverBorder[3] ~= nil then
+					row.hoverBorder[3]:SetExtent(borderSize, boxSize)
+				end
+				if row.hoverBorder[4] ~= nil then
+					row.hoverBorder[4]:SetExtent(borderSize, boxSize)
+				end
+			end
+			if row.nameLabel ~= nil then
+				row.nameLabel:SetExtent(boxSize - runtime:Scale(5), runtime:Scale(18))
+				row.nameLabel:RemoveAllAnchors()
+				row.nameLabel:AddAnchor("TOP", row, 0, runtime:Scale(5))
+				row.nameLabel.style:SetFontSize(runtime:Scale(8))
+			end
+			if row.countLabel ~= nil then
+				row.countLabel:SetExtent(boxSize - runtime:Scale(5), runtime:Scale(15))
+				row.countLabel:RemoveAllAnchors()
+				row.countLabel:AddAnchor("BOTTOM", row, 0, -runtime:Scale(3))
+				row.countLabel.style:SetFontSize(runtime:Scale(9))
 			end
 		end
 	end
@@ -1252,6 +1504,9 @@ ApplyTrackerLayout = function()
 	if isPickerOpen then
 		AnchorPickerWindow()
 	-- Toggles between horizontal and vertical layout, saves it, applies, and refreshes display.
+	end
+	if runtime.PositionResizeHandles ~= nil then
+		runtime:PositionResizeHandles()
 	end
 end
 
@@ -1267,15 +1522,20 @@ ToggleTrackerLayout = function()
 	UpdateRows()
 end
 
-for index = 1, TRACKED_SLOT_COUNT do
+function runtime:CreateTrackerRow(index)
+	if rowWidgets[index] ~= nil then
+		rowWidgets[index]:Show(true)
+		return
+	end
+
 	local row = trackerWindow:CreateChildWidget("button", "lootTrackerRow" .. tostring(index), 0, true)
 	row.index = index
 	row:SetText("")
-	row:SetExtent(BOX_SIZE, BOX_SIZE)
+	row:SetExtent(runtime:Scale(BOX_SIZE), runtime:Scale(BOX_SIZE))
 	row:AddAnchor(
 		"TOPLEFT",
 		trackerWindow,
-		GetTrackedRowsLeft() + ((index - 1) * (BOX_SIZE + BOX_GAP)),
+		GetTrackedRowsLeft() + ((index - 1) * (runtime:Scale(BOX_SIZE) + runtime:Scale(BOX_GAP))),
 		GetTrackedRowsTop()
 	)
 	SafeMethod(row, "Clickable", true)
@@ -1284,24 +1544,24 @@ for index = 1, TRACKED_SLOT_COUNT do
 
 	local rowBackground = row:CreateColorDrawable(0.06, 0.06, 0.07, 0.64, "background")
 	rowBackground:AddAnchor("TOPLEFT", row, 0, 0)
-	rowBackground:SetExtent(BOX_SIZE, BOX_SIZE)
+	rowBackground:SetExtent(runtime:Scale(BOX_SIZE), runtime:Scale(BOX_SIZE))
 	row.bg = rowBackground
 
 	local hoverTop = row:CreateColorDrawable(1, 0.86, 0.42, 0, "artwork")
 	hoverTop:AddAnchor("TOPLEFT", row, 0, 0)
-	hoverTop:SetExtent(BOX_SIZE, 1)
+	hoverTop:SetExtent(runtime:Scale(BOX_SIZE), runtime:Scale(1))
 
 	local hoverBottom = row:CreateColorDrawable(1, 0.86, 0.42, 0, "artwork")
 	hoverBottom:AddAnchor("BOTTOMLEFT", row, 0, 0)
-	hoverBottom:SetExtent(BOX_SIZE, 1)
+	hoverBottom:SetExtent(runtime:Scale(BOX_SIZE), runtime:Scale(1))
 
 	local hoverLeft = row:CreateColorDrawable(1, 0.86, 0.42, 0, "artwork")
 	hoverLeft:AddAnchor("TOPLEFT", row, 0, 0)
-	hoverLeft:SetExtent(1, BOX_SIZE)
+	hoverLeft:SetExtent(runtime:Scale(1), runtime:Scale(BOX_SIZE))
 
 	local hoverRight = row:CreateColorDrawable(1, 0.86, 0.42, 0, "artwork")
 	hoverRight:AddAnchor("TOPRIGHT", row, 0, 0)
-	hoverRight:SetExtent(1, BOX_SIZE)
+	hoverRight:SetExtent(runtime:Scale(1), runtime:Scale(BOX_SIZE))
 
 	row.hoverBorder = {
 		hoverTop,
@@ -1311,31 +1571,31 @@ for index = 1, TRACKED_SLOT_COUNT do
 	}
 
 	local rowIcon = row:CreateIconDrawable("artwork")
-	rowIcon:SetExtent(BOX_SIZE - 2, BOX_SIZE - 2)
-	rowIcon:AddAnchor("TOPLEFT", row, 1, 1)
+	rowIcon:SetExtent(runtime:Scale(BOX_SIZE - 2), runtime:Scale(BOX_SIZE - 2))
+	rowIcon:AddAnchor("TOPLEFT", row, runtime:Scale(1), runtime:Scale(1))
 	HideIconDrawable(rowIcon)
 	row.iconDrawable = rowIcon
 
 	local nameLabel = row:CreateChildWidget("label", "lootTrackerRowName" .. tostring(index), 0, true)
 	nameLabel:SetText("")
-	nameLabel:SetExtent(BOX_SIZE - 5, 18)
+	nameLabel:SetExtent(runtime:Scale(BOX_SIZE - 5), runtime:Scale(18))
 	nameLabel.style:SetAlign(ALIGN_CENTER)
-	nameLabel.style:SetFontSize(8)
+	nameLabel.style:SetFontSize(runtime:Scale(8))
 	nameLabel.style:SetColor(0.98, 0.98, 0.98, 1)
 	nameLabel.style:SetOutline(true)
-	nameLabel:AddAnchor("TOP", row, 0, 5)
+	nameLabel:AddAnchor("TOP", row, 0, runtime:Scale(5))
 	SafeMethod(nameLabel, "EnablePick", false)
 	row.nameLabel = nameLabel
 
 	local countLabel = row:CreateChildWidget("label", "lootTrackerRowCount" .. tostring(index), 0, true)
 	countLabel:SetText("")
-	countLabel:SetExtent(BOX_SIZE - 5, 15)
+	countLabel:SetExtent(runtime:Scale(BOX_SIZE - 5), runtime:Scale(15))
 	countLabel.style:SetAlign(ALIGN_CENTER)
-	countLabel.style:SetFontSize(9)
+	countLabel.style:SetFontSize(runtime:Scale(9))
 	countLabel.style:SetColor(0.92, 0.86, 0.62, 1)
 	countLabel.style:SetOutline(true)
 	-- Sets hover state to true for the row on mouse enter.
-	countLabel:AddAnchor("BOTTOM", row, 0, -3)
+	countLabel:AddAnchor("BOTTOM", row, 0, -runtime:Scale(3))
 	SafeMethod(countLabel, "EnablePick", false)
 	row.countLabel = countLabel
 
@@ -1372,11 +1632,282 @@ for index = 1, TRACKED_SLOT_COUNT do
 	function row:OnDragStop()
 		trackerWindow:StopMovingOrSizing()
 		SaveWindowPosition(trackerWindow)
+		if runtime.PositionResizeHandles ~= nil then
+			runtime:PositionResizeHandles()
+		end
 	end
 	row:SetHandler("OnDragStop", row.OnDragStop)
 
 	rowWidgets[index] = row
 end
+
+function runtime:ChangeSlotCount(delta)
+	local nextCount = TRACKED_SLOT_COUNT + (tonumber(delta) or 0)
+	if nextCount < 1 then
+		nextCount = 1
+	elseif nextCount > 20 then
+		nextCount = 20
+	end
+	if nextCount == TRACKED_SLOT_COUNT then
+		return
+	end
+
+	if nextCount < TRACKED_SLOT_COUNT then
+		for index = nextCount + 1, TRACKED_SLOT_COUNT do
+			trackedItems[index] = nil
+		end
+		if pickerSlotIndex ~= nil and pickerSlotIndex > nextCount then
+			ClosePicker()
+		end
+	end
+
+	TRACKED_SLOT_COUNT = nextCount
+	for index = 1, TRACKED_SLOT_COUNT do
+		self:CreateTrackerRow(index)
+	end
+	self:SaveSlotCount()
+	SaveTrackedItems()
+	ApplyTrackerLayout()
+	refreshRequested = true
+	UpdateRows()
+end
+
+function runtime:ApplyResizeGeometry(x, y, scale, shouldSave)
+	self.trackerScale = self:ClampScale(scale)
+	AnchorWidgetAtSavedPosition(trackerWindow, x, y)
+	ApplyTrackerLayout()
+	if shouldSave then
+		SaveWindowPosition(trackerWindow)
+		self:SaveWindowScale()
+	end
+end
+
+function runtime:PositionResizeHandles()
+	local x, y = GetWidgetSavedPosition(trackerWindow)
+	if x == nil or y == nil then
+		return
+	end
+
+	local width = GetTrackerWindowWidth()
+	local height = GetTrackerWindowHeight()
+	local handleSize = self:Scale(18)
+	for _, handle in ipairs(self.resizeHandles) do
+		if handle ~= nil and not handle.isResizing then
+			self:LayoutResizeGrip(handle)
+			local handleX = x
+			local handleY = y
+			if not handle.resizeFromLeft then
+				handleX = x + width - handleSize
+			end
+			if not handle.resizeFromTop then
+				handleY = y + height - handleSize
+			end
+			AnchorWidgetAtSavedPosition(handle, handleX, handleY)
+			SafeMethod(handle, "Raise")
+		end
+	end
+end
+
+function runtime:SetResizeHandlesVisible(visible)
+	for _, handle in ipairs(self.resizeHandles) do
+		if handle ~= nil then
+			handle:Show(visible or handle.isResizing == true)
+			if visible then
+				SafeMethod(handle, "Raise")
+			end
+		end
+	end
+end
+
+function runtime:IsResizing()
+	for _, handle in ipairs(self.resizeHandles) do
+		if handle ~= nil and handle.isResizing then
+			return true
+		end
+	end
+	return false
+end
+
+function runtime:SetResizeGripAlpha(handle, alpha)
+	if handle == nil then
+		return
+	end
+	if handle.resizeGripA ~= nil then
+		handle.resizeGripA:SetColor(1, 1, 1, alpha)
+	end
+	if handle.resizeGripB ~= nil then
+		handle.resizeGripB:SetColor(1, 1, 1, alpha)
+	end
+end
+
+function runtime:LayoutResizeGrip(handle)
+	if handle == nil then
+		return
+	end
+	local handleSize = self:Scale(18)
+	local lineLength = self:Scale(9)
+	local lineThickness = self:Scale(2)
+	local inset = self:Scale(5)
+	local horizontalX = inset
+	local verticalX = inset
+	local horizontalY = inset
+	local verticalY = inset
+	if not handle.resizeFromLeft then
+		horizontalX = handleSize - inset - lineLength
+		verticalX = handleSize - inset - lineThickness
+	end
+	if not handle.resizeFromTop then
+		horizontalY = handleSize - inset - lineThickness
+		verticalY = handleSize - inset - lineLength
+	end
+	handle:SetExtent(handleSize, handleSize)
+	if handle.resizeGripA ~= nil then
+		handle.resizeGripA:RemoveAllAnchors()
+		handle.resizeGripA:SetExtent(lineLength, lineThickness)
+		handle.resizeGripA:AddAnchor("TOPLEFT", handle, horizontalX, horizontalY)
+	end
+	if handle.resizeGripB ~= nil then
+		handle.resizeGripB:RemoveAllAnchors()
+		handle.resizeGripB:SetExtent(lineThickness, lineLength)
+		handle.resizeGripB:AddAnchor("TOPLEFT", handle, verticalX, verticalY)
+	end
+end
+
+function runtime:ComputeResizeGeometry(handle)
+	local data = handle.resizeDrag
+	if data == nil then
+		return nil
+	end
+
+	local handleX, handleY = GetWidgetSavedPosition(handle)
+	if handleX == nil or handleY == nil then
+		return nil
+	end
+
+	local deltaX = handleX - data.handleStartX
+	local deltaY = handleY - data.handleStartY
+	local width = data.startWidth
+	local height = data.startHeight
+	if data.resizeFromLeft then
+		width = data.startWidth - deltaX
+	else
+		width = data.startWidth + deltaX
+	end
+	if data.resizeFromTop then
+		height = data.startHeight - deltaY
+	else
+		height = data.startHeight + deltaY
+	end
+
+	local widthScale = width / data.baseWidth
+	local heightScale = height / data.baseHeight
+	local scale = widthScale
+	if math.abs(heightScale - data.startScale) > math.abs(widthScale - data.startScale) then
+		scale = heightScale
+	end
+	scale = self:ClampScale(scale)
+	width = self:ScaleAt(data.baseWidth, scale)
+	height = self:ScaleAt(data.baseHeight, scale)
+	local x = data.startX
+	local y = data.startY
+	if data.resizeFromLeft then
+		x = data.startX + data.startWidth - width
+	end
+	if data.resizeFromTop then
+		y = data.startY + data.startHeight - height
+	end
+	return x, y, scale
+end
+
+function runtime:CreateResizeHandle(name, anchor)
+	local handle = trackerWindow:CreateChildWidget("button", name, 0, true)
+	handle:SetText("")
+	handle:SetExtent(self:Scale(18), self:Scale(18))
+	handle:EnableDrag(true)
+	handle:Clickable(true)
+	handle.resizeFromLeft = string.find(anchor, "LEFT", 1, true) ~= nil
+	handle.resizeFromTop = string.find(anchor, "TOP", 1, true) ~= nil
+	handle.resizeGripA = handle:CreateColorDrawable(1, 1, 1, 0, "background")
+	handle.resizeGripB = handle:CreateColorDrawable(1, 1, 1, 0, "background")
+	handle:Show(false)
+	self:LayoutResizeGrip(handle)
+
+	function handle:OnEnter()
+		ShowTrackerHeaderControls()
+		runtime:SetResizeGripAlpha(self, 0.65)
+	end
+	handle:SetHandler("OnEnter", handle.OnEnter)
+
+	function handle:OnLeave()
+		if not self.isResizing then
+			runtime:SetResizeGripAlpha(self, 0)
+		end
+	end
+	handle:SetHandler("OnLeave", handle.OnLeave)
+
+	function handle:OnDragStart()
+		local startX, startY = GetWidgetSavedPosition(trackerWindow)
+		local handleStartX, handleStartY = GetWidgetSavedPosition(self)
+		if startX == nil or startY == nil or handleStartX == nil or handleStartY == nil then
+			return
+		end
+
+		self.resizeDrag = {
+			startX = startX,
+			startY = startY,
+			startWidth = GetTrackerWindowWidth(),
+			startHeight = GetTrackerWindowHeight(),
+			startScale = runtime.trackerScale,
+			baseWidth = runtime:GetBaseWindowWidth(),
+			baseHeight = runtime:GetBaseWindowHeight(),
+			handleStartX = handleStartX,
+			handleStartY = handleStartY,
+			resizeFromLeft = self.resizeFromLeft,
+			resizeFromTop = self.resizeFromTop,
+		}
+		self.isResizing = true
+		runtime:SetResizeGripAlpha(self, 0.65)
+		ShowTrackerHeaderControls()
+		self:StartMoving()
+	end
+	handle:SetHandler("OnDragStart", handle.OnDragStart)
+
+	function handle:OnUpdate()
+		if self.isResizing then
+			local x, y, scale = runtime:ComputeResizeGeometry(self)
+			if x ~= nil then
+				runtime:ApplyResizeGeometry(x, y, scale, false)
+			end
+		end
+	end
+	handle:SetHandler("OnUpdate", handle.OnUpdate)
+
+	function handle:OnDragStop()
+		self:StopMovingOrSizing()
+		local x, y, scale = runtime:ComputeResizeGeometry(self)
+		if x ~= nil then
+			runtime:ApplyResizeGeometry(x, y, scale, true)
+		end
+		self.resizeDrag = nil
+		self.isResizing = false
+		runtime:SetResizeGripAlpha(self, 0)
+		runtime:PositionResizeHandles()
+	end
+	handle:SetHandler("OnDragStop", handle.OnDragStop)
+
+	return handle
+end
+
+for index = 1, TRACKED_SLOT_COUNT do
+	runtime:CreateTrackerRow(index)
+end
+
+runtime.resizeHandles = {
+	runtime:CreateResizeHandle("lootTrackerResizeTopLeft", "TOPLEFT"),
+	runtime:CreateResizeHandle("lootTrackerResizeTopRight", "TOPRIGHT"),
+	runtime:CreateResizeHandle("lootTrackerResizeBottomLeft", "BOTTOMLEFT"),
+	runtime:CreateResizeHandle("lootTrackerResizeBottomRight", "BOTTOMRIGHT"),
+}
 
 ApplyTrackerLayout()
 HideTrackerHeaderControls()
@@ -2038,6 +2569,9 @@ function trackerWindow:OnDragStop()
 	-- Handles the OnDragStop event for the tracker window. Stops moving/sizing and saves the current window position to persistent storage.
 	self:StopMovingOrSizing()
 	SaveWindowPosition(self)
+	if runtime.PositionResizeHandles ~= nil then
+		runtime:PositionResizeHandles()
+	end
 end
 trackerWindow:SetHandler("OnDragStop", trackerWindow.OnDragStop)
 
