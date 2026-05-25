@@ -8,7 +8,7 @@ List of custom AA addons
 ## Loot Tracker
 <p>A simple Addon for keeping track of item quantity count in inventory for farming loot</p>
 
-<img src="img/thumbnail.png">
+<img src="img/loot_tracker/thumbnail.png">
 
 
 <ul>
