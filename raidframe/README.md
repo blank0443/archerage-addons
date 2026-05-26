@@ -14,3 +14,5 @@ Addon for customizing an overlay ontop of the in-game raid window.
 - Low HP color alert
 - Selective raid box blocking
 - Custom range to blank boxes.
+- Locked Mode: Allows click through overlay, hides bg window.
+- Unlocked Mode: Allows you to resize and reposition window
