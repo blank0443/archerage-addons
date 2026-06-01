@@ -50,6 +50,8 @@ local runtime = {
 	chatCommandListener = nil,
 	resizeHandles = {},
 	trackerScale = 1,
+	menuMode = false,
+	escMenuButtonRegistered = false,
 }
 _G.__LOOT_TRACKER_RUNTIME = runtime
 
@@ -62,9 +64,14 @@ local CONFIG = {
 	RESTORE_POSITION_KEY = "lootTrackerRestoreButtonPosition",
 	PICKER_POSITION_KEY = "lootTrackerPickerWindowPosition",
 	LAYOUT_KEY = "lootTrackerLayout",
+	MENU_MODE_KEY = "lootTrackerEscMenuMode",
 
 	LAYOUT_HORIZONTAL = "horizontal",
 	LAYOUT_VERTICAL = "vertical",
+	ESC_MENU_CATEGORY_ID = 3,
+	ESC_MENU_CONTENT_ID = 1552,
+	ESC_MENU_ICON_KEY = "bag",
+	ESC_MENU_BUTTON_NAME = "Loot Tracker",
 	RESTORE_BUTTON_WIDTH = 92,
 	RESTORE_BUTTON_HEIGHT = 22,
 	PADDING = 9,
@@ -76,6 +83,7 @@ local CONFIG = {
 	HEADER_BUTTON_HEIGHT = 18,
 	ROTATE_BUTTON_WIDTH = 24,
 	RESET_BUTTON_WIDTH = 24,
+	MENU_BUTTON_WIDTH = 34,
 	HIDE_WINDOW_BUTTON_WIDTH = 34,
 	BOX_SIZE = 40,
 	BOX_GAP = 6,
@@ -562,6 +570,65 @@ local function LoadTrackerLayout()
 	return CONFIG.LAYOUT_HORIZONTAL
 end
 
+function runtime:SaveMenuMode()
+	pcall(function()
+		ADDON:ClearData(CONFIG.MENU_MODE_KEY)
+		ADDON:SaveData(CONFIG.MENU_MODE_KEY, {
+			enabled = self.menuMode == true,
+		})
+	end)
+end
+
+function runtime:LoadMenuMode()
+	local ok, data = pcall(function()
+		return ADDON:LoadData(CONFIG.MENU_MODE_KEY)
+	end)
+	if not ok then
+		return
+	end
+
+	if type(data) == "table" then
+		self.menuMode = data.enabled == true
+	elseif type(data) == "boolean" then
+		self.menuMode = data == true
+	end
+end
+
+function runtime:RegisterEscMenuButton()
+	if ADDON == nil
+		or type(ADDON.RegisterContentTriggerFunc) ~= "function"
+		or type(ADDON.AddEscMenuButton) ~= "function"
+	then
+		return false
+	end
+
+	local ok = pcall(function()
+		ADDON:RegisterContentTriggerFunc(CONFIG.ESC_MENU_CONTENT_ID, function(show)
+			local currentRuntime = _G.__LOOT_TRACKER_RUNTIME
+			if currentRuntime ~= nil
+				and currentRuntime.active
+				and type(currentRuntime.OpenFromEscMenu) == "function"
+			then
+				currentRuntime:OpenFromEscMenu(show)
+			end
+		end)
+		if _G.__LOOT_TRACKER_ESC_MENU_BUTTON_ADDED ~= true then
+			ADDON:AddEscMenuButton(
+				CONFIG.ESC_MENU_CATEGORY_ID,
+				CONFIG.ESC_MENU_CONTENT_ID,
+				CONFIG.ESC_MENU_ICON_KEY,
+				CONFIG.ESC_MENU_BUTTON_NAME
+			)
+			_G.__LOOT_TRACKER_ESC_MENU_BUTTON_ADDED = true
+		end
+	end)
+
+	if ok then
+		self.escMenuButtonRegistered = true
+	end
+	return ok
+end
+
 function runtime:SaveSlotCount()
 	pcall(function()
 		ADDON:ClearData("lootTrackerSlotCount")
@@ -658,18 +725,21 @@ function runtime:GetBaseWindowWidth()
 	end
 
 	if trackerLayout == CONFIG.LAYOUT_VERTICAL then
-		return CONFIG.BOX_SIZE + CONFIG.HEADER_BUTTON_GAP + CONFIG.HIDE_WINDOW_BUTTON_WIDTH
+		return CONFIG.BOX_SIZE
+			+ CONFIG.HEADER_BUTTON_GAP
+			+ math.max(CONFIG.HIDE_WINDOW_BUTTON_WIDTH, CONFIG.MENU_BUTTON_WIDTH)
 	end
 	return math.max(
 		self:GetBaseRowsSpan(),
 		CONFIG.HEADER_TITLE_WIDTH
 			+ CONFIG.ROTATE_BUTTON_WIDTH
 			+ CONFIG.RESET_BUTTON_WIDTH
+			+ CONFIG.MENU_BUTTON_WIDTH
 			+ CONFIG.RESET_BUTTON_WIDTH
 			+ CONFIG.RESET_BUTTON_WIDTH
 			+ CONFIG.RESET_BUTTON_WIDTH
 			+ CONFIG.HIDE_WINDOW_BUTTON_WIDTH
-			+ (CONFIG.HEADER_BUTTON_GAP * 6)
+			+ (CONFIG.HEADER_BUTTON_GAP * 7)
 	) + (CONFIG.TRACKER_PADDING * 2)
 end
 
@@ -678,7 +748,7 @@ function runtime:GetBaseWindowHeight()
 		if not trackerHeaderControlsVisible then
 			return self:GetBaseRowsSpan()
 		end
-		return math.max(self:GetBaseRowsSpan(), (CONFIG.HEADER_BUTTON_HEIGHT * 6) + (CONFIG.HEADER_BUTTON_GAP * 5))
+		return math.max(self:GetBaseRowsSpan(), (CONFIG.HEADER_BUTTON_HEIGHT * 7) + (CONFIG.HEADER_BUTTON_GAP * 6))
 	end
 	if not trackerHeaderControlsVisible then
 		return CONFIG.BOX_SIZE
@@ -1035,6 +1105,7 @@ end
 
 runtime:LoadSlotCount()
 runtime:LoadWindowScale()
+runtime:LoadMenuMode()
 LoadTrackedItems()
 trackerLayout = LoadTrackerLayout()
 
@@ -1106,6 +1177,11 @@ local function HideLootTrackerWindow()
 	end
 	SaveWindowPosition(trackerWindow)
 	ClosePicker()
+	if runtime.menuMode then
+		trackerWindow:Show(false)
+		restoreButton:Show(false)
+		return
+	end
 	if not restoreButtonPositionSaved then
 		local windowX, windowY = GetWidgetSavedPosition(trackerWindow)
 		AnchorWidgetAtSavedPosition(restoreButton, windowX, windowY)
@@ -1131,6 +1207,51 @@ local function ShowLootTrackerWindow()
 	ApplyTrackerLayout()
 	-- Shows the loot tracker window when restore button is clicked.
 	UpdateRows()
+end
+
+function runtime:OpenFromEscMenu(show)
+	if show == false then
+		HideLootTrackerWindow()
+		return
+	end
+
+	if show == nil
+		and trackerWindow ~= nil
+		and type(trackerWindow.IsVisible) == "function"
+		and trackerWindow:IsVisible()
+	then
+		HideLootTrackerWindow()
+		return
+	end
+
+	ShowLootTrackerWindow()
+end
+
+function runtime:UpdateMenuModeButton()
+	if self.menuModeButton ~= nil then
+		self.menuModeButton:SetText("M:" .. (self.menuMode and "1" or "0"))
+	end
+end
+
+function runtime:SetMenuMode(enabled, shouldSave)
+	if enabled == true then
+		if not self:RegisterEscMenuButton() then
+			return
+		end
+		self.menuMode = true
+		restoreButton:Show(false)
+	else
+		self.menuMode = false
+	end
+
+	self:UpdateMenuModeButton()
+	if shouldSave then
+		self:SaveMenuMode()
+	end
+end
+
+if runtime.menuMode or _G.__LOOT_TRACKER_ESC_MENU_BUTTON_ADDED == true then
+	runtime:RegisterEscMenuButton()
 end
 
 function restoreButton:OnClick()
@@ -1201,6 +1322,16 @@ function resetButton:OnClick()
 end
 resetButton:SetHandler("OnClick", resetButton.OnClick)
 
+runtime.menuModeButton = trackerWindow:CreateChildWidget("button", "lootTrackerMenuModeButton", 0, true)
+runtime.menuModeButton:SetStyle("text_default")
+runtime.menuModeButton:SetExtent(CONFIG.MENU_BUTTON_WIDTH, 18)
+runtime:UpdateMenuModeButton()
+
+function runtime.menuModeButton:OnClick()
+	runtime:SetMenuMode(not runtime.menuMode, true)
+end
+runtime.menuModeButton:SetHandler("OnClick", runtime.menuModeButton.OnClick)
+
 runtime.killCounterButton = trackerWindow:CreateChildWidget("button", "lootTrackerKillCounterButton", 0, true)
 runtime.killCounterButton:SetStyle("text_default")
 runtime.killCounterButton:SetText("K")
@@ -1255,6 +1386,7 @@ SetTrackerHeaderControlsVisible = function(visible)
 		headerLabel:Show(visible and trackerLayout ~= CONFIG.LAYOUT_VERTICAL)
 		rotateButton:Show(visible)
 		resetButton:Show(visible)
+		runtime.menuModeButton:Show(visible)
 		runtime.killCounterButton:Show(visible)
 		runtime.addSlotButton:Show(visible)
 		runtime.removeSlotButton:Show(visible)
@@ -1275,6 +1407,7 @@ SetTrackerHeaderControlsVisible = function(visible)
 	headerLabel:Show(visible and trackerLayout ~= CONFIG.LAYOUT_VERTICAL)
 	rotateButton:Show(visible)
 	resetButton:Show(visible)
+	runtime.menuModeButton:Show(visible)
 	runtime.killCounterButton:Show(visible)
 	runtime.addSlotButton:Show(visible)
 	runtime.removeSlotButton:Show(visible)
@@ -1323,6 +1456,7 @@ headerLabel:SetHandler("OnEnter", headerLabel.OnEnter)
 
 rotateButton:SetHandler("OnEnter", ShowTrackerHeaderControls)
 resetButton:SetHandler("OnEnter", ShowTrackerHeaderControls)
+runtime.menuModeButton:SetHandler("OnEnter", ShowTrackerHeaderControls)
 runtime.killCounterButton:SetHandler("OnEnter", ShowTrackerHeaderControls)
 runtime.addSlotButton:SetHandler("OnEnter", ShowTrackerHeaderControls)
 runtime.removeSlotButton:SetHandler("OnEnter", ShowTrackerHeaderControls)
@@ -1336,14 +1470,16 @@ local function AnchorHeaderControls()
 	headerLabel.style:SetFontSize(runtime:Scale(11))
 	rotateButton:SetExtent(runtime:Scale(CONFIG.ROTATE_BUTTON_WIDTH), runtime:Scale(CONFIG.HEADER_BUTTON_HEIGHT))
 	resetButton:SetExtent(runtime:Scale(CONFIG.RESET_BUTTON_WIDTH), runtime:Scale(CONFIG.HEADER_BUTTON_HEIGHT))
+	runtime.menuModeButton:SetExtent(runtime:Scale(CONFIG.MENU_BUTTON_WIDTH), runtime:Scale(CONFIG.HEADER_BUTTON_HEIGHT))
 	runtime.killCounterButton:SetExtent(runtime:Scale(CONFIG.RESET_BUTTON_WIDTH), runtime:Scale(CONFIG.HEADER_BUTTON_HEIGHT))
 	runtime.addSlotButton:SetExtent(runtime:Scale(CONFIG.RESET_BUTTON_WIDTH), runtime:Scale(CONFIG.HEADER_BUTTON_HEIGHT))
 	runtime.removeSlotButton:SetExtent(runtime:Scale(CONFIG.RESET_BUTTON_WIDTH), runtime:Scale(CONFIG.HEADER_BUTTON_HEIGHT))
 	hideWindowButton:SetExtent(runtime:Scale(CONFIG.HIDE_WINDOW_BUTTON_WIDTH), runtime:Scale(CONFIG.HEADER_BUTTON_HEIGHT))
 
 	if trackerLayout == CONFIG.LAYOUT_VERTICAL then
+		local railButtonWidth = math.max(CONFIG.HIDE_WINDOW_BUTTON_WIDTH, CONFIG.MENU_BUTTON_WIDTH)
 		local railLeft = runtime:Scale(CONFIG.BOX_SIZE + CONFIG.HEADER_BUTTON_GAP)
-		local narrowLeft = railLeft + math.floor((runtime:Scale(CONFIG.HIDE_WINDOW_BUTTON_WIDTH) - runtime:Scale(CONFIG.RESET_BUTTON_WIDTH)) / 2)
+		local narrowLeft = railLeft + math.floor((runtime:Scale(railButtonWidth) - runtime:Scale(CONFIG.RESET_BUTTON_WIDTH)) / 2)
 		headerLabel:Show(false)
 
 		rotateButton:RemoveAllAnchors()
@@ -1357,12 +1493,20 @@ local function AnchorHeaderControls()
 			runtime:Scale(CONFIG.HEADER_BUTTON_HEIGHT + CONFIG.HEADER_BUTTON_GAP)
 		)
 
+		runtime.menuModeButton:RemoveAllAnchors()
+		runtime.menuModeButton:AddAnchor(
+			"TOPLEFT",
+			trackerWindow,
+			railLeft,
+			runtime:Scale((CONFIG.HEADER_BUTTON_HEIGHT * 2) + (CONFIG.HEADER_BUTTON_GAP * 2))
+		)
+
 		runtime.killCounterButton:RemoveAllAnchors()
 		runtime.killCounterButton:AddAnchor(
 			"TOPLEFT",
 			trackerWindow,
 			narrowLeft,
-			runtime:Scale((CONFIG.HEADER_BUTTON_HEIGHT * 2) + (CONFIG.HEADER_BUTTON_GAP * 2))
+			runtime:Scale((CONFIG.HEADER_BUTTON_HEIGHT * 3) + (CONFIG.HEADER_BUTTON_GAP * 3))
 		)
 
 		runtime.addSlotButton:RemoveAllAnchors()
@@ -1370,7 +1514,7 @@ local function AnchorHeaderControls()
 			"TOPLEFT",
 			trackerWindow,
 			narrowLeft,
-			runtime:Scale((CONFIG.HEADER_BUTTON_HEIGHT * 3) + (CONFIG.HEADER_BUTTON_GAP * 3))
+			runtime:Scale((CONFIG.HEADER_BUTTON_HEIGHT * 4) + (CONFIG.HEADER_BUTTON_GAP * 4))
 		)
 
 		runtime.removeSlotButton:RemoveAllAnchors()
@@ -1378,7 +1522,7 @@ local function AnchorHeaderControls()
 			"TOPLEFT",
 			trackerWindow,
 			narrowLeft,
-			runtime:Scale((CONFIG.HEADER_BUTTON_HEIGHT * 4) + (CONFIG.HEADER_BUTTON_GAP * 4))
+			runtime:Scale((CONFIG.HEADER_BUTTON_HEIGHT * 5) + (CONFIG.HEADER_BUTTON_GAP * 5))
 		)
 
 		hideWindowButton:RemoveAllAnchors()
@@ -1386,7 +1530,7 @@ local function AnchorHeaderControls()
 			"TOPLEFT",
 			trackerWindow,
 			railLeft,
-			runtime:Scale((CONFIG.HEADER_BUTTON_HEIGHT * 5) + (CONFIG.HEADER_BUTTON_GAP * 5))
+			runtime:Scale((CONFIG.HEADER_BUTTON_HEIGHT * 6) + (CONFIG.HEADER_BUTTON_GAP * 6))
 		)
 		return
 	end
@@ -1429,6 +1573,24 @@ local function AnchorHeaderControls()
 		runtime:Scale(CONFIG.TRACKER_TOP_PADDING + 1)
 	)
 
+	runtime.menuModeButton:RemoveAllAnchors()
+	runtime.menuModeButton:AddAnchor(
+		"TOPRIGHT",
+		trackerWindow,
+		-runtime:Scale(
+			CONFIG.TRACKER_PADDING
+				+ CONFIG.HIDE_WINDOW_BUTTON_WIDTH
+				+ CONFIG.HEADER_BUTTON_GAP
+				+ CONFIG.RESET_BUTTON_WIDTH
+				+ CONFIG.HEADER_BUTTON_GAP
+				+ CONFIG.RESET_BUTTON_WIDTH
+				+ CONFIG.HEADER_BUTTON_GAP
+				+ CONFIG.RESET_BUTTON_WIDTH
+				+ CONFIG.HEADER_BUTTON_GAP
+		),
+		runtime:Scale(CONFIG.TRACKER_TOP_PADDING + 1)
+	)
+
 	resetButton:RemoveAllAnchors()
 	resetButton:AddAnchor(
 		"TOPRIGHT",
@@ -1442,6 +1604,8 @@ local function AnchorHeaderControls()
 				+ CONFIG.RESET_BUTTON_WIDTH
 				+ CONFIG.HEADER_BUTTON_GAP
 				+ CONFIG.RESET_BUTTON_WIDTH
+				+ CONFIG.HEADER_BUTTON_GAP
+				+ CONFIG.MENU_BUTTON_WIDTH
 				+ CONFIG.HEADER_BUTTON_GAP
 		),
 		runtime:Scale(CONFIG.TRACKER_TOP_PADDING + 1)
@@ -1462,6 +1626,8 @@ local function AnchorHeaderControls()
 				+ CONFIG.RESET_BUTTON_WIDTH
 				+ CONFIG.HEADER_BUTTON_GAP
 				+ CONFIG.RESET_BUTTON_WIDTH
+				+ CONFIG.HEADER_BUTTON_GAP
+				+ CONFIG.MENU_BUTTON_WIDTH
 				+ CONFIG.HEADER_BUTTON_GAP
 		),
 		runtime:Scale(CONFIG.TRACKER_TOP_PADDING + 1)

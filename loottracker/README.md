@@ -17,7 +17,7 @@ Click on one of the slots to add/change an item to keep track of.
 
 - Automatically hide UI buttons when not hovered.
 - Keep track of items farmed (5 default)
-- Easily hide the addon when not in use (X Button)
+- Easily hide the addon when not in use (X Button) or in Esc Menu (M:0/M:1)
 - Search items in inventory (Click on box slot)
 - Switch Between vertical or horizontal display (R Button)
 - Easily clear tracked items (C Button)
