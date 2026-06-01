@@ -54,48 +54,51 @@ local runtime = {
 _G.__LOOT_TRACKER_RUNTIME = runtime
 
 local TRACKED_SLOT_COUNT = 5
-local BAG_KIND = 1
-local MAX_BAG_SLOTS = 150
-local SAVE_KEY = "lootTrackerTrackedItems"
-local POSITION_KEY = "lootTrackerWindowPosition"
-local RESTORE_POSITION_KEY = "lootTrackerRestoreButtonPosition"
-local PICKER_POSITION_KEY = "lootTrackerPickerWindowPosition"
-local LAYOUT_KEY = "lootTrackerLayout"
+local CONFIG = {
+	BAG_KIND = 1,
+	MAX_BAG_SLOTS = 150,
+	SAVE_KEY = "lootTrackerTrackedItems",
+	POSITION_KEY = "lootTrackerWindowPosition",
+	RESTORE_POSITION_KEY = "lootTrackerRestoreButtonPosition",
+	PICKER_POSITION_KEY = "lootTrackerPickerWindowPosition",
+	LAYOUT_KEY = "lootTrackerLayout",
 
-local LAYOUT_HORIZONTAL = "horizontal"
-local LAYOUT_VERTICAL = "vertical"
-local RESTORE_BUTTON_WIDTH = 92
-local RESTORE_BUTTON_HEIGHT = 22
-local PADDING = 9
-local TRACKER_PADDING = 4
-local TRACKER_TOP_PADDING = 1
-local HEADER_HEIGHT = 22
-local HEADER_TITLE_WIDTH = 78
-local HEADER_BUTTON_GAP = 4
-local HEADER_BUTTON_HEIGHT = 18
-local ROTATE_BUTTON_WIDTH = 24
-local RESET_BUTTON_WIDTH = 24
-local HIDE_WINDOW_BUTTON_WIDTH = 34
-local BOX_SIZE = 40
-local BOX_GAP = 6
-local TRACKER_ROW_TOP_GAP = 3
-local BOXES_TOP = TRACKER_TOP_PADDING + HEADER_HEIGHT + TRACKER_ROW_TOP_GAP
+	LAYOUT_HORIZONTAL = "horizontal",
+	LAYOUT_VERTICAL = "vertical",
+	RESTORE_BUTTON_WIDTH = 92,
+	RESTORE_BUTTON_HEIGHT = 22,
+	PADDING = 9,
+	TRACKER_PADDING = 4,
+	TRACKER_TOP_PADDING = 1,
+	HEADER_HEIGHT = 22,
+	HEADER_TITLE_WIDTH = 78,
+	HEADER_BUTTON_GAP = 4,
+	HEADER_BUTTON_HEIGHT = 18,
+	ROTATE_BUTTON_WIDTH = 24,
+	RESET_BUTTON_WIDTH = 24,
+	HIDE_WINDOW_BUTTON_WIDTH = 34,
+	BOX_SIZE = 40,
+	BOX_GAP = 6,
+	TRACKER_ROW_TOP_GAP = 3,
 
-local PICKER_WIDTH = 330
-local PICKER_HEIGHT = 328
-local PICKER_COLUMNS = 3
-local PICKER_ROWS = 5
-local PICKER_VISIBLE_COUNT = PICKER_COLUMNS * PICKER_ROWS
-local PICKER_ITEM_WIDTH = 96
-local PICKER_ITEM_HEIGHT = 34
-local PICKER_ITEM_GAP_X = 6
-local PICKER_ITEM_GAP_Y = 6
-local PICKER_SEARCH_TOP = 42
-local PICKER_SEARCH_HEIGHT = 30
-local PICKER_GRID_TOP = 84
-local PICKER_CONTROL_TOP = PICKER_GRID_TOP + (PICKER_ROWS * (PICKER_ITEM_HEIGHT + PICKER_ITEM_GAP_Y))
-local INVENTORY_FALLBACK_REFRESH_SECONDS = 2.0
-local SEARCH_POLL_INTERVAL = 0.12
+	PICKER_WIDTH = 330,
+	PICKER_HEIGHT = 328,
+	PICKER_COLUMNS = 3,
+	PICKER_ROWS = 5,
+	PICKER_ITEM_WIDTH = 96,
+	PICKER_ITEM_HEIGHT = 34,
+	PICKER_ITEM_GAP_X = 6,
+	PICKER_ITEM_GAP_Y = 6,
+	PICKER_SEARCH_TOP = 42,
+	PICKER_SEARCH_HEIGHT = 30,
+	PICKER_GRID_TOP = 84,
+	INVENTORY_FALLBACK_REFRESH_SECONDS = 2.0,
+	SEARCH_POLL_INTERVAL = 0.12,
+}
+CONFIG.BOXES_TOP = CONFIG.TRACKER_TOP_PADDING + CONFIG.HEADER_HEIGHT + CONFIG.TRACKER_ROW_TOP_GAP
+CONFIG.PICKER_VISIBLE_COUNT = CONFIG.PICKER_COLUMNS * CONFIG.PICKER_ROWS
+CONFIG.PICKER_CONTROL_TOP = CONFIG.PICKER_GRID_TOP
+	+ (CONFIG.PICKER_ROWS * (CONFIG.PICKER_ITEM_HEIGHT + CONFIG.PICKER_ITEM_GAP_Y))
 
 local trackedItems = {}
 local rowWidgets = {}
@@ -113,7 +116,7 @@ local refreshRequested = true
 local inventoryDirty = true
 local inventoryItemsByKey = nil
 local inventoryOrderedItems = nil
-local trackerLayout = LAYOUT_HORIZONTAL
+local trackerLayout = CONFIG.LAYOUT_HORIZONTAL
 local restoreButtonPositionSaved = false
 local pickerWindowPositionSaved = false
 local trackerHeaderControlsVisible = true
@@ -279,7 +282,7 @@ end
 
 local function ReadBagItem(posInBag)
 	local ok, item = pcall(function()
-		return X2Bag:GetBagItemInfo(BAG_KIND, posInBag)
+		return X2Bag:GetBagItemInfo(CONFIG.BAG_KIND, posInBag)
 	end)
 	if ok then
 		return item
@@ -291,7 +294,7 @@ local function ReadInventory()
 	local itemsByKey = {}
 	local orderedItems = {}
 
-	for posInBag = 1, MAX_BAG_SLOTS do
+	for posInBag = 1, CONFIG.MAX_BAG_SLOTS do
 		local item = ReadBagItem(posInBag)
 		local name = ExtractItemName(item)
 		if name ~= nil and tostring(name) ~= "" then
@@ -428,14 +431,14 @@ local function SaveTrackedItems()
 	end
 
 	pcall(function()
-		ADDON:ClearData(SAVE_KEY)
-		ADDON:SaveData(SAVE_KEY, data)
+		ADDON:ClearData(CONFIG.SAVE_KEY)
+		ADDON:SaveData(CONFIG.SAVE_KEY, data)
 	end)
 end
 
 local function LoadTrackedItems()
 	local ok, data = pcall(function()
-		return ADDON:LoadData(SAVE_KEY)
+		return ADDON:LoadData(CONFIG.SAVE_KEY)
 	end)
 	if not ok or type(data) ~= "table" then
 		return
@@ -503,42 +506,42 @@ local function LoadSavedPosition(key, defaultX, defaultY)
 end
 
 local function SaveWindowPosition(window)
-	SaveWidgetPosition(window, POSITION_KEY)
+	SaveWidgetPosition(window, CONFIG.POSITION_KEY)
 end
 
 local function SaveRestoreButtonPosition(button)
-	SaveWidgetPosition(button, RESTORE_POSITION_KEY)
+	SaveWidgetPosition(button, CONFIG.RESTORE_POSITION_KEY)
 	restoreButtonPositionSaved = true
 end
 
 local function SavePickerWindowPosition(window)
-	SaveWidgetPosition(window, PICKER_POSITION_KEY)
+	SaveWidgetPosition(window, CONFIG.PICKER_POSITION_KEY)
 	pickerWindowPositionSaved = true
 end
 
 local function LoadWindowPosition()
-	return LoadSavedPosition(POSITION_KEY, 420, 320)
+	return LoadSavedPosition(CONFIG.POSITION_KEY, 420, 320)
 end
 
 local function LoadRestoreButtonPosition(defaultX, defaultY)
-	return LoadSavedPosition(RESTORE_POSITION_KEY, defaultX, defaultY)
+	return LoadSavedPosition(CONFIG.RESTORE_POSITION_KEY, defaultX, defaultY)
 end
 
 local function LoadPickerWindowPosition(defaultX, defaultY)
-	return LoadSavedPosition(PICKER_POSITION_KEY, defaultX, defaultY)
+	return LoadSavedPosition(CONFIG.PICKER_POSITION_KEY, defaultX, defaultY)
 end
 
 local function NormalizeTrackerLayout(value)
-	if value == LAYOUT_VERTICAL then
-		return LAYOUT_VERTICAL
+	if value == CONFIG.LAYOUT_VERTICAL then
+		return CONFIG.LAYOUT_VERTICAL
 	end
-	return LAYOUT_HORIZONTAL
+	return CONFIG.LAYOUT_HORIZONTAL
 end
 
 local function SaveTrackerLayout()
 	pcall(function()
-		ADDON:ClearData(LAYOUT_KEY)
-		ADDON:SaveData(LAYOUT_KEY, {
+		ADDON:ClearData(CONFIG.LAYOUT_KEY)
+		ADDON:SaveData(CONFIG.LAYOUT_KEY, {
 			layout = trackerLayout,
 		})
 	end)
@@ -546,7 +549,7 @@ end
 
 local function LoadTrackerLayout()
 	local ok, data = pcall(function()
-		return ADDON:LoadData(LAYOUT_KEY)
+		return ADDON:LoadData(CONFIG.LAYOUT_KEY)
 	end)
 	if ok then
 		if type(data) == "table" then
@@ -556,7 +559,7 @@ local function LoadTrackerLayout()
 			return NormalizeTrackerLayout(data)
 		end
 	end
-	return LAYOUT_HORIZONTAL
+	return CONFIG.LAYOUT_HORIZONTAL
 end
 
 function runtime:SaveSlotCount()
@@ -643,43 +646,44 @@ function runtime:LoadWindowScale()
 end
 
 function runtime:GetBaseRowsSpan()
-	return (TRACKED_SLOT_COUNT * BOX_SIZE) + ((TRACKED_SLOT_COUNT - 1) * BOX_GAP)
+	return (TRACKED_SLOT_COUNT * CONFIG.BOX_SIZE) + ((TRACKED_SLOT_COUNT - 1) * CONFIG.BOX_GAP)
 end
 
 function runtime:GetBaseWindowWidth()
 	if not trackerHeaderControlsVisible then
-		if trackerLayout == LAYOUT_VERTICAL then
-			return BOX_SIZE
+		if trackerLayout == CONFIG.LAYOUT_VERTICAL then
+			return CONFIG.BOX_SIZE
 		end
 		return self:GetBaseRowsSpan()
 	end
 
-	if trackerLayout == LAYOUT_VERTICAL then
-		return BOX_SIZE + HEADER_BUTTON_GAP + HIDE_WINDOW_BUTTON_WIDTH
+	if trackerLayout == CONFIG.LAYOUT_VERTICAL then
+		return CONFIG.BOX_SIZE + CONFIG.HEADER_BUTTON_GAP + CONFIG.HIDE_WINDOW_BUTTON_WIDTH
 	end
 	return math.max(
 		self:GetBaseRowsSpan(),
-		HEADER_TITLE_WIDTH
-			+ ROTATE_BUTTON_WIDTH
-			+ RESET_BUTTON_WIDTH
-			+ RESET_BUTTON_WIDTH
-			+ RESET_BUTTON_WIDTH
-			+ HIDE_WINDOW_BUTTON_WIDTH
-			+ (HEADER_BUTTON_GAP * 5)
-	) + (TRACKER_PADDING * 2)
+		CONFIG.HEADER_TITLE_WIDTH
+			+ CONFIG.ROTATE_BUTTON_WIDTH
+			+ CONFIG.RESET_BUTTON_WIDTH
+			+ CONFIG.RESET_BUTTON_WIDTH
+			+ CONFIG.RESET_BUTTON_WIDTH
+			+ CONFIG.RESET_BUTTON_WIDTH
+			+ CONFIG.HIDE_WINDOW_BUTTON_WIDTH
+			+ (CONFIG.HEADER_BUTTON_GAP * 6)
+	) + (CONFIG.TRACKER_PADDING * 2)
 end
 
 function runtime:GetBaseWindowHeight()
-	if trackerLayout == LAYOUT_VERTICAL then
+	if trackerLayout == CONFIG.LAYOUT_VERTICAL then
 		if not trackerHeaderControlsVisible then
 			return self:GetBaseRowsSpan()
 		end
-		return math.max(self:GetBaseRowsSpan(), (HEADER_BUTTON_HEIGHT * 5) + (HEADER_BUTTON_GAP * 4))
+		return math.max(self:GetBaseRowsSpan(), (CONFIG.HEADER_BUTTON_HEIGHT * 6) + (CONFIG.HEADER_BUTTON_GAP * 5))
 	end
 	if not trackerHeaderControlsVisible then
-		return BOX_SIZE
+		return CONFIG.BOX_SIZE
 	end
-	return BOXES_TOP + BOX_SIZE + TRACKER_PADDING
+	return CONFIG.BOXES_TOP + CONFIG.BOX_SIZE + CONFIG.TRACKER_PADDING
 end
 
 local function GetTrackedRowsSpan()
@@ -691,7 +695,7 @@ local function GetTrackerWindowWidth()
 end
 
 local function GetTrackedRowsLeft()
-	if trackerLayout == LAYOUT_VERTICAL then
+	if trackerLayout == CONFIG.LAYOUT_VERTICAL then
 		return 0
 	end
 	return math.floor((GetTrackerWindowWidth() - GetTrackedRowsSpan()) / 2)
@@ -702,10 +706,10 @@ local function GetTrackedRowsTop()
 		return 0
 	end
 
-	if trackerLayout == LAYOUT_VERTICAL then
+	if trackerLayout == CONFIG.LAYOUT_VERTICAL then
 		return 0
 	end
-	return runtime:Scale(BOXES_TOP)
+	return runtime:Scale(CONFIG.BOXES_TOP)
 end
 
 local function GetTrackerWindowHeight()
@@ -1050,7 +1054,7 @@ local restoreButton = UIParent:CreateWidget("button", "lootTrackerRestoreButton"
 runtime.restoreButton = restoreButton
 restoreButton:SetStyle("text_default")
 restoreButton:SetText("Loot Tracker")
-restoreButton:SetExtent(RESTORE_BUTTON_WIDTH, RESTORE_BUTTON_HEIGHT)
+restoreButton:SetExtent(CONFIG.RESTORE_BUTTON_WIDTH, CONFIG.RESTORE_BUTTON_HEIGHT)
 restoreButton:EnableDrag(true)
 SafeMethod(restoreButton, "Clickable", true)
 restoreButton:AddAnchor("TOPLEFT", "UIParent", restoreSavedX, restoreSavedY)
@@ -1153,12 +1157,12 @@ background:AddAnchor("BOTTOMRIGHT", trackerWindow, 0, 0)
 
 local headerLabel = trackerWindow:CreateChildWidget("label", "lootTrackerHeaderLabel", 0, true)
 headerLabel:SetText("Loot Tracker")
-headerLabel:SetExtent(HEADER_TITLE_WIDTH, HEADER_HEIGHT)
+headerLabel:SetExtent(CONFIG.HEADER_TITLE_WIDTH, CONFIG.HEADER_HEIGHT)
 headerLabel.style:SetAlign(ALIGN_LEFT)
 headerLabel.style:SetFontSize(11)
 headerLabel.style:SetColor(0.95, 0.92, 0.82, 1)
 headerLabel.style:SetOutline(true)
-headerLabel:AddAnchor("TOPLEFT", trackerWindow, TRACKER_PADDING, TRACKER_TOP_PADDING + 2)
+headerLabel:AddAnchor("TOPLEFT", trackerWindow, CONFIG.TRACKER_PADDING, CONFIG.TRACKER_TOP_PADDING + 2)
 SafeMethod(headerLabel, "EnableDrag", true)
 
 function headerLabel:OnDragStart()
@@ -1180,7 +1184,7 @@ local ToggleTrackerLayout
 local rotateButton = trackerWindow:CreateChildWidget("button", "lootTrackerRotateButton", 0, true)
 rotateButton:SetStyle("text_default")
 rotateButton:SetText("R")
-rotateButton:SetExtent(ROTATE_BUTTON_WIDTH, 18)
+rotateButton:SetExtent(CONFIG.ROTATE_BUTTON_WIDTH, 18)
 
 function rotateButton:OnClick()
 	ToggleTrackerLayout()
@@ -1190,17 +1194,34 @@ rotateButton:SetHandler("OnClick", rotateButton.OnClick)
 local resetButton = trackerWindow:CreateChildWidget("button", "lootTrackerResetButton", 0, true)
 resetButton:SetStyle("text_default")
 resetButton:SetText("C")
-resetButton:SetExtent(RESET_BUTTON_WIDTH, 18)
+resetButton:SetExtent(CONFIG.RESET_BUTTON_WIDTH, 18)
 
 function resetButton:OnClick()
 	ClearTrackedItems()
 end
 resetButton:SetHandler("OnClick", resetButton.OnClick)
 
+runtime.killCounterButton = trackerWindow:CreateChildWidget("button", "lootTrackerKillCounterButton", 0, true)
+runtime.killCounterButton:SetStyle("text_default")
+runtime.killCounterButton:SetText("K")
+runtime.killCounterButton:SetExtent(CONFIG.RESET_BUTTON_WIDTH, 18)
+
+function runtime:OpenKillCounterWindow()
+	local counterRuntime = _G.__LOOT_KILL_COUNTER_RUNTIME
+	if counterRuntime ~= nil and type(counterRuntime.ShowCounterWindow) == "function" then
+		counterRuntime:ShowCounterWindow()
+	end
+end
+
+function runtime.killCounterButton:OnClick()
+	runtime:OpenKillCounterWindow()
+end
+runtime.killCounterButton:SetHandler("OnClick", runtime.killCounterButton.OnClick)
+
 runtime.addSlotButton = trackerWindow:CreateChildWidget("button", "lootTrackerAddSlotButton", 0, true)
 runtime.addSlotButton:SetStyle("text_default")
 runtime.addSlotButton:SetText("+")
-runtime.addSlotButton:SetExtent(RESET_BUTTON_WIDTH, 18)
+runtime.addSlotButton:SetExtent(CONFIG.RESET_BUTTON_WIDTH, 18)
 
 function runtime.addSlotButton:OnClick()
 	runtime:ChangeSlotCount(1)
@@ -1210,7 +1231,7 @@ runtime.addSlotButton:SetHandler("OnClick", runtime.addSlotButton.OnClick)
 runtime.removeSlotButton = trackerWindow:CreateChildWidget("button", "lootTrackerRemoveSlotButton", 0, true)
 runtime.removeSlotButton:SetStyle("text_default")
 runtime.removeSlotButton:SetText("-")
-runtime.removeSlotButton:SetExtent(RESET_BUTTON_WIDTH, 18)
+runtime.removeSlotButton:SetExtent(CONFIG.RESET_BUTTON_WIDTH, 18)
 
 function runtime.removeSlotButton:OnClick()
 	runtime:ChangeSlotCount(-1)
@@ -1220,7 +1241,7 @@ runtime.removeSlotButton:SetHandler("OnClick", runtime.removeSlotButton.OnClick)
 local hideWindowButton = trackerWindow:CreateChildWidget("button", "lootTrackerHideWindowButton", 0, true)
 hideWindowButton:SetStyle("text_default")
 hideWindowButton:SetText("X")
-hideWindowButton:SetExtent(HIDE_WINDOW_BUTTON_WIDTH, 18)
+hideWindowButton:SetExtent(CONFIG.HIDE_WINDOW_BUTTON_WIDTH, 18)
 
 function hideWindowButton:OnClick()
 	HideLootTrackerWindow()
@@ -1231,9 +1252,10 @@ SetTrackerHeaderControlsVisible = function(visible)
 	if trackerHeaderControlsVisible == visible then
 		SafeMethod(background, "SetVisible", visible)
 		SafeMethod(background, "Show", visible)
-		headerLabel:Show(visible and trackerLayout ~= LAYOUT_VERTICAL)
+		headerLabel:Show(visible and trackerLayout ~= CONFIG.LAYOUT_VERTICAL)
 		rotateButton:Show(visible)
 		resetButton:Show(visible)
+		runtime.killCounterButton:Show(visible)
 		runtime.addSlotButton:Show(visible)
 		runtime.removeSlotButton:Show(visible)
 		hideWindowButton:Show(visible)
@@ -1250,9 +1272,10 @@ SetTrackerHeaderControlsVisible = function(visible)
 	trackerHeaderControlsVisible = visible
 	SafeMethod(background, "SetVisible", visible)
 	SafeMethod(background, "Show", visible)
-	headerLabel:Show(visible and trackerLayout ~= LAYOUT_VERTICAL)
+	headerLabel:Show(visible and trackerLayout ~= CONFIG.LAYOUT_VERTICAL)
 	rotateButton:Show(visible)
 	resetButton:Show(visible)
+	runtime.killCounterButton:Show(visible)
 	runtime.addSlotButton:Show(visible)
 	runtime.removeSlotButton:Show(visible)
 	hideWindowButton:Show(visible)
@@ -1300,6 +1323,7 @@ headerLabel:SetHandler("OnEnter", headerLabel.OnEnter)
 
 rotateButton:SetHandler("OnEnter", ShowTrackerHeaderControls)
 resetButton:SetHandler("OnEnter", ShowTrackerHeaderControls)
+runtime.killCounterButton:SetHandler("OnEnter", ShowTrackerHeaderControls)
 runtime.addSlotButton:SetHandler("OnEnter", ShowTrackerHeaderControls)
 runtime.removeSlotButton:SetHandler("OnEnter", ShowTrackerHeaderControls)
 hideWindowButton:SetHandler("OnEnter", ShowTrackerHeaderControls)
@@ -1307,18 +1331,19 @@ hideWindowButton:SetHandler("OnEnter", ShowTrackerHeaderControls)
 local function AnchorHeaderControls()
 	-- Anchors the header label and control buttons based on current tracker layout.
 	headerLabel:RemoveAllAnchors()
-	headerLabel:SetExtent(runtime:Scale(HEADER_TITLE_WIDTH), runtime:Scale(HEADER_HEIGHT))
+	headerLabel:SetExtent(runtime:Scale(CONFIG.HEADER_TITLE_WIDTH), runtime:Scale(CONFIG.HEADER_HEIGHT))
 	headerLabel.style:SetAlign(ALIGN_LEFT)
 	headerLabel.style:SetFontSize(runtime:Scale(11))
-	rotateButton:SetExtent(runtime:Scale(ROTATE_BUTTON_WIDTH), runtime:Scale(HEADER_BUTTON_HEIGHT))
-	resetButton:SetExtent(runtime:Scale(RESET_BUTTON_WIDTH), runtime:Scale(HEADER_BUTTON_HEIGHT))
-	runtime.addSlotButton:SetExtent(runtime:Scale(RESET_BUTTON_WIDTH), runtime:Scale(HEADER_BUTTON_HEIGHT))
-	runtime.removeSlotButton:SetExtent(runtime:Scale(RESET_BUTTON_WIDTH), runtime:Scale(HEADER_BUTTON_HEIGHT))
-	hideWindowButton:SetExtent(runtime:Scale(HIDE_WINDOW_BUTTON_WIDTH), runtime:Scale(HEADER_BUTTON_HEIGHT))
+	rotateButton:SetExtent(runtime:Scale(CONFIG.ROTATE_BUTTON_WIDTH), runtime:Scale(CONFIG.HEADER_BUTTON_HEIGHT))
+	resetButton:SetExtent(runtime:Scale(CONFIG.RESET_BUTTON_WIDTH), runtime:Scale(CONFIG.HEADER_BUTTON_HEIGHT))
+	runtime.killCounterButton:SetExtent(runtime:Scale(CONFIG.RESET_BUTTON_WIDTH), runtime:Scale(CONFIG.HEADER_BUTTON_HEIGHT))
+	runtime.addSlotButton:SetExtent(runtime:Scale(CONFIG.RESET_BUTTON_WIDTH), runtime:Scale(CONFIG.HEADER_BUTTON_HEIGHT))
+	runtime.removeSlotButton:SetExtent(runtime:Scale(CONFIG.RESET_BUTTON_WIDTH), runtime:Scale(CONFIG.HEADER_BUTTON_HEIGHT))
+	hideWindowButton:SetExtent(runtime:Scale(CONFIG.HIDE_WINDOW_BUTTON_WIDTH), runtime:Scale(CONFIG.HEADER_BUTTON_HEIGHT))
 
-	if trackerLayout == LAYOUT_VERTICAL then
-		local railLeft = runtime:Scale(BOX_SIZE + HEADER_BUTTON_GAP)
-		local narrowLeft = railLeft + math.floor((runtime:Scale(HIDE_WINDOW_BUTTON_WIDTH) - runtime:Scale(RESET_BUTTON_WIDTH)) / 2)
+	if trackerLayout == CONFIG.LAYOUT_VERTICAL then
+		local railLeft = runtime:Scale(CONFIG.BOX_SIZE + CONFIG.HEADER_BUTTON_GAP)
+		local narrowLeft = railLeft + math.floor((runtime:Scale(CONFIG.HIDE_WINDOW_BUTTON_WIDTH) - runtime:Scale(CONFIG.RESET_BUTTON_WIDTH)) / 2)
 		headerLabel:Show(false)
 
 		rotateButton:RemoveAllAnchors()
@@ -1329,7 +1354,15 @@ local function AnchorHeaderControls()
 			"TOPLEFT",
 			trackerWindow,
 			narrowLeft,
-			runtime:Scale(HEADER_BUTTON_HEIGHT + HEADER_BUTTON_GAP)
+			runtime:Scale(CONFIG.HEADER_BUTTON_HEIGHT + CONFIG.HEADER_BUTTON_GAP)
+		)
+
+		runtime.killCounterButton:RemoveAllAnchors()
+		runtime.killCounterButton:AddAnchor(
+			"TOPLEFT",
+			trackerWindow,
+			narrowLeft,
+			runtime:Scale((CONFIG.HEADER_BUTTON_HEIGHT * 2) + (CONFIG.HEADER_BUTTON_GAP * 2))
 		)
 
 		runtime.addSlotButton:RemoveAllAnchors()
@@ -1337,7 +1370,7 @@ local function AnchorHeaderControls()
 			"TOPLEFT",
 			trackerWindow,
 			narrowLeft,
-			runtime:Scale((HEADER_BUTTON_HEIGHT * 2) + (HEADER_BUTTON_GAP * 2))
+			runtime:Scale((CONFIG.HEADER_BUTTON_HEIGHT * 3) + (CONFIG.HEADER_BUTTON_GAP * 3))
 		)
 
 		runtime.removeSlotButton:RemoveAllAnchors()
@@ -1345,7 +1378,7 @@ local function AnchorHeaderControls()
 			"TOPLEFT",
 			trackerWindow,
 			narrowLeft,
-			runtime:Scale((HEADER_BUTTON_HEIGHT * 3) + (HEADER_BUTTON_GAP * 3))
+			runtime:Scale((CONFIG.HEADER_BUTTON_HEIGHT * 4) + (CONFIG.HEADER_BUTTON_GAP * 4))
 		)
 
 		hideWindowButton:RemoveAllAnchors()
@@ -1353,31 +1386,47 @@ local function AnchorHeaderControls()
 			"TOPLEFT",
 			trackerWindow,
 			railLeft,
-			runtime:Scale((HEADER_BUTTON_HEIGHT * 4) + (HEADER_BUTTON_GAP * 4))
+			runtime:Scale((CONFIG.HEADER_BUTTON_HEIGHT * 5) + (CONFIG.HEADER_BUTTON_GAP * 5))
 		)
 		return
 	end
 
 	headerLabel:Show(trackerHeaderControlsVisible)
-	headerLabel:AddAnchor("TOPLEFT", trackerWindow, runtime:Scale(TRACKER_PADDING), runtime:Scale(TRACKER_TOP_PADDING + 2))
+	headerLabel:AddAnchor("TOPLEFT", trackerWindow, runtime:Scale(CONFIG.TRACKER_PADDING), runtime:Scale(CONFIG.TRACKER_TOP_PADDING + 2))
 
 	hideWindowButton:RemoveAllAnchors()
-	hideWindowButton:AddAnchor("TOPRIGHT", trackerWindow, -runtime:Scale(TRACKER_PADDING), runtime:Scale(TRACKER_TOP_PADDING + 1))
+	hideWindowButton:AddAnchor("TOPRIGHT", trackerWindow, -runtime:Scale(CONFIG.TRACKER_PADDING), runtime:Scale(CONFIG.TRACKER_TOP_PADDING + 1))
 
 	runtime.removeSlotButton:RemoveAllAnchors()
 	runtime.removeSlotButton:AddAnchor(
 		"TOPRIGHT",
 		trackerWindow,
-		-runtime:Scale(TRACKER_PADDING + HIDE_WINDOW_BUTTON_WIDTH + HEADER_BUTTON_GAP),
-		runtime:Scale(TRACKER_TOP_PADDING + 1)
+		-runtime:Scale(CONFIG.TRACKER_PADDING + CONFIG.HIDE_WINDOW_BUTTON_WIDTH + CONFIG.HEADER_BUTTON_GAP),
+		runtime:Scale(CONFIG.TRACKER_TOP_PADDING + 1)
 	)
 
 	runtime.addSlotButton:RemoveAllAnchors()
 	runtime.addSlotButton:AddAnchor(
 		"TOPRIGHT",
 		trackerWindow,
-		-runtime:Scale(TRACKER_PADDING + HIDE_WINDOW_BUTTON_WIDTH + HEADER_BUTTON_GAP + RESET_BUTTON_WIDTH + HEADER_BUTTON_GAP),
-		runtime:Scale(TRACKER_TOP_PADDING + 1)
+		-runtime:Scale(CONFIG.TRACKER_PADDING + CONFIG.HIDE_WINDOW_BUTTON_WIDTH + CONFIG.HEADER_BUTTON_GAP + CONFIG.RESET_BUTTON_WIDTH + CONFIG.HEADER_BUTTON_GAP),
+		runtime:Scale(CONFIG.TRACKER_TOP_PADDING + 1)
+	)
+
+	runtime.killCounterButton:RemoveAllAnchors()
+	runtime.killCounterButton:AddAnchor(
+		"TOPRIGHT",
+		trackerWindow,
+		-runtime:Scale(
+			CONFIG.TRACKER_PADDING
+				+ CONFIG.HIDE_WINDOW_BUTTON_WIDTH
+				+ CONFIG.HEADER_BUTTON_GAP
+				+ CONFIG.RESET_BUTTON_WIDTH
+				+ CONFIG.HEADER_BUTTON_GAP
+				+ CONFIG.RESET_BUTTON_WIDTH
+				+ CONFIG.HEADER_BUTTON_GAP
+		),
+		runtime:Scale(CONFIG.TRACKER_TOP_PADDING + 1)
 	)
 
 	resetButton:RemoveAllAnchors()
@@ -1385,15 +1434,17 @@ local function AnchorHeaderControls()
 		"TOPRIGHT",
 		trackerWindow,
 		-runtime:Scale(
-			TRACKER_PADDING
-				+ HIDE_WINDOW_BUTTON_WIDTH
-				+ HEADER_BUTTON_GAP
-				+ RESET_BUTTON_WIDTH
-				+ HEADER_BUTTON_GAP
-				+ RESET_BUTTON_WIDTH
-				+ HEADER_BUTTON_GAP
+			CONFIG.TRACKER_PADDING
+				+ CONFIG.HIDE_WINDOW_BUTTON_WIDTH
+				+ CONFIG.HEADER_BUTTON_GAP
+				+ CONFIG.RESET_BUTTON_WIDTH
+				+ CONFIG.HEADER_BUTTON_GAP
+				+ CONFIG.RESET_BUTTON_WIDTH
+				+ CONFIG.HEADER_BUTTON_GAP
+				+ CONFIG.RESET_BUTTON_WIDTH
+				+ CONFIG.HEADER_BUTTON_GAP
 		),
-		runtime:Scale(TRACKER_TOP_PADDING + 1)
+		runtime:Scale(CONFIG.TRACKER_TOP_PADDING + 1)
 	)
 
 	rotateButton:RemoveAllAnchors()
@@ -1401,17 +1452,19 @@ local function AnchorHeaderControls()
 		"TOPRIGHT",
 		trackerWindow,
 		-runtime:Scale(
-			TRACKER_PADDING
-				+ HIDE_WINDOW_BUTTON_WIDTH
-				+ HEADER_BUTTON_GAP
-				+ RESET_BUTTON_WIDTH
-				+ HEADER_BUTTON_GAP
-				+ RESET_BUTTON_WIDTH
-				+ HEADER_BUTTON_GAP
-				+ RESET_BUTTON_WIDTH
-				+ HEADER_BUTTON_GAP
+			CONFIG.TRACKER_PADDING
+				+ CONFIG.HIDE_WINDOW_BUTTON_WIDTH
+				+ CONFIG.HEADER_BUTTON_GAP
+				+ CONFIG.RESET_BUTTON_WIDTH
+				+ CONFIG.HEADER_BUTTON_GAP
+				+ CONFIG.RESET_BUTTON_WIDTH
+				+ CONFIG.HEADER_BUTTON_GAP
+				+ CONFIG.RESET_BUTTON_WIDTH
+				+ CONFIG.HEADER_BUTTON_GAP
+				+ CONFIG.RESET_BUTTON_WIDTH
+				+ CONFIG.HEADER_BUTTON_GAP
 		),
-		runtime:Scale(TRACKER_TOP_PADDING + 1)
+		runtime:Scale(CONFIG.TRACKER_TOP_PADDING + 1)
 	)
 
 end
@@ -1439,8 +1492,8 @@ local function AnchorTrackedRows()
 			row:Show(false)
 		elseif row ~= nil then
 			row:Show(true)
-			local boxSize = runtime:Scale(BOX_SIZE)
-			local boxGap = runtime:Scale(BOX_GAP)
+			local boxSize = runtime:Scale(CONFIG.BOX_SIZE)
+			local boxGap = runtime:Scale(CONFIG.BOX_GAP)
 			local borderSize = runtime:Scale(1)
 			local iconInset = runtime:Scale(1)
 			local iconSize = boxSize - (iconInset * 2)
@@ -1450,7 +1503,7 @@ local function AnchorTrackedRows()
 			local offsetX = GetTrackedRowsLeft() + ((index - 1) * (boxSize + boxGap))
 			local offsetY = GetTrackedRowsTop()
 
-			if trackerLayout == LAYOUT_VERTICAL then
+			if trackerLayout == CONFIG.LAYOUT_VERTICAL then
 				offsetX = GetTrackedRowsLeft()
 				offsetY = GetTrackedRowsTop() + ((index - 1) * (boxSize + boxGap))
 			end
@@ -1511,10 +1564,10 @@ ApplyTrackerLayout = function()
 end
 
 ToggleTrackerLayout = function()
-	if trackerLayout == LAYOUT_VERTICAL then
-		trackerLayout = LAYOUT_HORIZONTAL
+	if trackerLayout == CONFIG.LAYOUT_VERTICAL then
+		trackerLayout = CONFIG.LAYOUT_HORIZONTAL
 	else
-		trackerLayout = LAYOUT_VERTICAL
+		trackerLayout = CONFIG.LAYOUT_VERTICAL
 	end
 	SaveTrackerLayout()
 	ApplyTrackerLayout()
@@ -1531,11 +1584,11 @@ function runtime:CreateTrackerRow(index)
 	local row = trackerWindow:CreateChildWidget("button", "lootTrackerRow" .. tostring(index), 0, true)
 	row.index = index
 	row:SetText("")
-	row:SetExtent(runtime:Scale(BOX_SIZE), runtime:Scale(BOX_SIZE))
+	row:SetExtent(runtime:Scale(CONFIG.BOX_SIZE), runtime:Scale(CONFIG.BOX_SIZE))
 	row:AddAnchor(
 		"TOPLEFT",
 		trackerWindow,
-		GetTrackedRowsLeft() + ((index - 1) * (runtime:Scale(BOX_SIZE) + runtime:Scale(BOX_GAP))),
+		GetTrackedRowsLeft() + ((index - 1) * (runtime:Scale(CONFIG.BOX_SIZE) + runtime:Scale(CONFIG.BOX_GAP))),
 		GetTrackedRowsTop()
 	)
 	SafeMethod(row, "Clickable", true)
@@ -1544,24 +1597,24 @@ function runtime:CreateTrackerRow(index)
 
 	local rowBackground = row:CreateColorDrawable(0.06, 0.06, 0.07, 0.64, "background")
 	rowBackground:AddAnchor("TOPLEFT", row, 0, 0)
-	rowBackground:SetExtent(runtime:Scale(BOX_SIZE), runtime:Scale(BOX_SIZE))
+	rowBackground:SetExtent(runtime:Scale(CONFIG.BOX_SIZE), runtime:Scale(CONFIG.BOX_SIZE))
 	row.bg = rowBackground
 
 	local hoverTop = row:CreateColorDrawable(1, 0.86, 0.42, 0, "artwork")
 	hoverTop:AddAnchor("TOPLEFT", row, 0, 0)
-	hoverTop:SetExtent(runtime:Scale(BOX_SIZE), runtime:Scale(1))
+	hoverTop:SetExtent(runtime:Scale(CONFIG.BOX_SIZE), runtime:Scale(1))
 
 	local hoverBottom = row:CreateColorDrawable(1, 0.86, 0.42, 0, "artwork")
 	hoverBottom:AddAnchor("BOTTOMLEFT", row, 0, 0)
-	hoverBottom:SetExtent(runtime:Scale(BOX_SIZE), runtime:Scale(1))
+	hoverBottom:SetExtent(runtime:Scale(CONFIG.BOX_SIZE), runtime:Scale(1))
 
 	local hoverLeft = row:CreateColorDrawable(1, 0.86, 0.42, 0, "artwork")
 	hoverLeft:AddAnchor("TOPLEFT", row, 0, 0)
-	hoverLeft:SetExtent(runtime:Scale(1), runtime:Scale(BOX_SIZE))
+	hoverLeft:SetExtent(runtime:Scale(1), runtime:Scale(CONFIG.BOX_SIZE))
 
 	local hoverRight = row:CreateColorDrawable(1, 0.86, 0.42, 0, "artwork")
 	hoverRight:AddAnchor("TOPRIGHT", row, 0, 0)
-	hoverRight:SetExtent(runtime:Scale(1), runtime:Scale(BOX_SIZE))
+	hoverRight:SetExtent(runtime:Scale(1), runtime:Scale(CONFIG.BOX_SIZE))
 
 	row.hoverBorder = {
 		hoverTop,
@@ -1571,14 +1624,14 @@ function runtime:CreateTrackerRow(index)
 	}
 
 	local rowIcon = row:CreateIconDrawable("artwork")
-	rowIcon:SetExtent(runtime:Scale(BOX_SIZE - 2), runtime:Scale(BOX_SIZE - 2))
+	rowIcon:SetExtent(runtime:Scale(CONFIG.BOX_SIZE - 2), runtime:Scale(CONFIG.BOX_SIZE - 2))
 	rowIcon:AddAnchor("TOPLEFT", row, runtime:Scale(1), runtime:Scale(1))
 	HideIconDrawable(rowIcon)
 	row.iconDrawable = rowIcon
 
 	local nameLabel = row:CreateChildWidget("label", "lootTrackerRowName" .. tostring(index), 0, true)
 	nameLabel:SetText("")
-	nameLabel:SetExtent(runtime:Scale(BOX_SIZE - 5), runtime:Scale(18))
+	nameLabel:SetExtent(runtime:Scale(CONFIG.BOX_SIZE - 5), runtime:Scale(18))
 	nameLabel.style:SetAlign(ALIGN_CENTER)
 	nameLabel.style:SetFontSize(runtime:Scale(8))
 	nameLabel.style:SetColor(0.98, 0.98, 0.98, 1)
@@ -1589,7 +1642,7 @@ function runtime:CreateTrackerRow(index)
 
 	local countLabel = row:CreateChildWidget("label", "lootTrackerRowCount" .. tostring(index), 0, true)
 	countLabel:SetText("")
-	countLabel:SetExtent(runtime:Scale(BOX_SIZE - 5), runtime:Scale(15))
+	countLabel:SetExtent(runtime:Scale(CONFIG.BOX_SIZE - 5), runtime:Scale(15))
 	countLabel.style:SetAlign(ALIGN_CENTER)
 	countLabel.style:SetFontSize(runtime:Scale(9))
 	countLabel.style:SetColor(0.92, 0.86, 0.62, 1)
@@ -1914,7 +1967,7 @@ HideTrackerHeaderControls()
 
 local pickerWindow = CreateEmptyWindow("lootTrackerPickerWindow", "UIParent")
 runtime.pickerWindow = pickerWindow
-pickerWindow:SetExtent(PICKER_WIDTH, PICKER_HEIGHT)
+pickerWindow:SetExtent(CONFIG.PICKER_WIDTH, CONFIG.PICKER_HEIGHT)
 pickerWindow:EnableDrag(true)
 pickerWindow:Clickable(true)
 pickerWindow:Show(false)
@@ -1932,12 +1985,12 @@ pickerBackground:AddAnchor("BOTTOMRIGHT", pickerWindow, 0, 0)
 
 local pickerTitle = pickerWindow:CreateChildWidget("label", "lootTrackerPickerTitle", 0, true)
 pickerTitle:SetText("Inventory")
-pickerTitle:SetExtent(PICKER_WIDTH - 56, HEADER_HEIGHT)
+pickerTitle:SetExtent(CONFIG.PICKER_WIDTH - 56, CONFIG.HEADER_HEIGHT)
 pickerTitle.style:SetAlign(ALIGN_LEFT)
 pickerTitle.style:SetFontSize(12)
 pickerTitle.style:SetColor(0.95, 0.92, 0.82, 1)
 pickerTitle.style:SetOutline(true)
-pickerTitle:AddAnchor("TOPLEFT", pickerWindow, PADDING, PADDING + 2)
+pickerTitle:AddAnchor("TOPLEFT", pickerWindow, CONFIG.PADDING, CONFIG.PADDING + 2)
 SafeMethod(pickerTitle, "EnableDrag", true)
 
 function pickerTitle:OnDragStart()
@@ -1955,7 +2008,7 @@ local pickerCloseButton = pickerWindow:CreateChildWidget("button", "lootTrackerP
 pickerCloseButton:SetStyle("text_default")
 pickerCloseButton:SetText("X")
 pickerCloseButton:SetExtent(26, 22)
-pickerCloseButton:AddAnchor("TOPRIGHT", pickerWindow, -PADDING, PADDING)
+pickerCloseButton:AddAnchor("TOPRIGHT", pickerWindow, -CONFIG.PADDING, CONFIG.PADDING)
 
 function pickerCloseButton:OnClick()
 	ClosePicker()
@@ -1963,12 +2016,12 @@ end
 pickerCloseButton:SetHandler("OnClick", pickerCloseButton.OnClick)
 
 local pickerSearchBorder = pickerWindow:CreateColorDrawable(0.96, 0.9, 0.72, 0.62, "artwork")
-pickerSearchBorder:AddAnchor("TOPLEFT", pickerWindow, PADDING, PICKER_SEARCH_TOP)
-pickerSearchBorder:SetExtent(PICKER_WIDTH - (PADDING * 2), PICKER_SEARCH_HEIGHT)
+pickerSearchBorder:AddAnchor("TOPLEFT", pickerWindow, CONFIG.PADDING, CONFIG.PICKER_SEARCH_TOP)
+pickerSearchBorder:SetExtent(CONFIG.PICKER_WIDTH - (CONFIG.PADDING * 2), CONFIG.PICKER_SEARCH_HEIGHT)
 
 local pickerSearchBackground = pickerWindow:CreateColorDrawable(0.86, 0.88, 0.82, 0.42, "artwork")
-pickerSearchBackground:AddAnchor("TOPLEFT", pickerWindow, PADDING + 2, PICKER_SEARCH_TOP + 2)
-pickerSearchBackground:SetExtent(PICKER_WIDTH - (PADDING * 2) - 4, PICKER_SEARCH_HEIGHT - 4)
+pickerSearchBackground:AddAnchor("TOPLEFT", pickerWindow, CONFIG.PADDING + 2, CONFIG.PICKER_SEARCH_TOP + 2)
+pickerSearchBackground:SetExtent(CONFIG.PICKER_WIDTH - (CONFIG.PADDING * 2) - 4, CONFIG.PICKER_SEARCH_HEIGHT - 4)
 
 _G.__LOOT_TRACKER_SEARCH_BOX_SERIAL = _G.__LOOT_TRACKER_SEARCH_BOX_SERIAL or 0
 local pickerSearchBox = nil
@@ -1984,8 +2037,8 @@ local function ConfigurePickerSearchBox(searchBox)
 	if searchBox == nil then
 		return
 	end
-	searchBox:AddAnchor("TOPLEFT", pickerWindow, PADDING + 4, PICKER_SEARCH_TOP + 3)
-	searchBox:SetExtent(PICKER_WIDTH - (PADDING * 2) - 8, PICKER_SEARCH_HEIGHT - 6)
+	searchBox:AddAnchor("TOPLEFT", pickerWindow, CONFIG.PADDING + 4, CONFIG.PICKER_SEARCH_TOP + 3)
+	searchBox:SetExtent(CONFIG.PICKER_WIDTH - (CONFIG.PADDING * 2) - 8, CONFIG.PICKER_SEARCH_HEIGHT - 6)
 	searchBox:SetText("")
 	SafeMethod(searchBox, "SetMaxTextLength", 64)
 	SafeMethod(searchBox, "SetInset", 7, 0, 7, 0)
@@ -2009,19 +2062,19 @@ pickerStatusLabel.style:SetAlign(ALIGN_CENTER)
 pickerStatusLabel.style:SetFontSize(10)
 pickerStatusLabel.style:SetColor(0.82, 0.82, 0.82, 1)
 pickerStatusLabel.style:SetOutline(true)
-pickerStatusLabel:AddAnchor("TOP", pickerWindow, 0, PICKER_CONTROL_TOP + 2)
+pickerStatusLabel:AddAnchor("TOP", pickerWindow, 0, CONFIG.PICKER_CONTROL_TOP + 2)
 
 local pickerUpButton = pickerWindow:CreateChildWidget("button", "lootTrackerPickerUpButton", 0, true)
 pickerUpButton:SetStyle("text_default")
 pickerUpButton:SetText("Up")
 pickerUpButton:SetExtent(64, 22)
-pickerUpButton:AddAnchor("TOPLEFT", pickerWindow, PADDING, PICKER_CONTROL_TOP)
+pickerUpButton:AddAnchor("TOPLEFT", pickerWindow, CONFIG.PADDING, CONFIG.PICKER_CONTROL_TOP)
 
 local pickerDownButton = pickerWindow:CreateChildWidget("button", "lootTrackerPickerDownButton", 0, true)
 pickerDownButton:SetStyle("text_default")
 pickerDownButton:SetText("Down")
 pickerDownButton:SetExtent(64, 22)
-pickerDownButton:AddAnchor("TOPRIGHT", pickerWindow, -PADDING, PICKER_CONTROL_TOP)
+pickerDownButton:AddAnchor("TOPRIGHT", pickerWindow, -CONFIG.PADDING, CONFIG.PICKER_CONTROL_TOP)
 
 local pickerSearchGetterCandidates = {
 	{ name = "GetText" },
@@ -2328,7 +2381,7 @@ end
 
 local function ClampPickerScroll()
 	-- Clamps the picker scroll index to valid range based on total items and visible count.
-	local maxStart = #pickerItems - PICKER_VISIBLE_COUNT + 1
+	local maxStart = #pickerItems - CONFIG.PICKER_VISIBLE_COUNT + 1
 	if maxStart < 1 then
 		maxStart = 1
 	end
@@ -2362,7 +2415,7 @@ UpdatePicker = function()
 	pickerItems = BuildPickerItems(pickerSearchText)
 	ClampPickerScroll()
 
-	for visibleIndex = 1, PICKER_VISIBLE_COUNT do
+	for visibleIndex = 1, CONFIG.PICKER_VISIBLE_COUNT do
 		local button = pickerItemWidgets[visibleIndex]
 		SetPickerButton(button, pickerItems[pickerScrollIndex + visibleIndex - 1])
 	end
@@ -2372,7 +2425,7 @@ UpdatePicker = function()
 		pickerStatusLabel:SetText("0 / 0")
 	else
 		local firstVisible = pickerScrollIndex
-		local lastVisible = pickerScrollIndex + PICKER_VISIBLE_COUNT - 1
+		local lastVisible = pickerScrollIndex + CONFIG.PICKER_VISIBLE_COUNT - 1
 		if lastVisible > total then
 			lastVisible = total
 		end
@@ -2390,14 +2443,14 @@ local function ScrollPicker(deltaItems)
 end
 
 function pickerUpButton:OnClick()
-	ScrollPicker(-PICKER_COLUMNS)
+	ScrollPicker(-CONFIG.PICKER_COLUMNS)
 end
 	-- Handles click on the picker down button to scroll down by one column.
 pickerUpButton:SetHandler("OnClick", pickerUpButton.OnClick)
 
 function pickerDownButton:OnClick()
 	-- Attaches all necessary event handlers (text change, key, mouse wheel) to the picker search box.
-	ScrollPicker(PICKER_COLUMNS)
+	ScrollPicker(CONFIG.PICKER_COLUMNS)
 end
 pickerDownButton:SetHandler("OnClick", pickerDownButton.OnClick)
 
@@ -2432,30 +2485,30 @@ RecreatePickerSearchBox = function()
 	return pickerSearchBox
 end
 
-for rowIndex = 1, PICKER_ROWS do
-	for columnIndex = 1, PICKER_COLUMNS do
-		local visibleIndex = ((rowIndex - 1) * PICKER_COLUMNS) + columnIndex
+for rowIndex = 1, CONFIG.PICKER_ROWS do
+	for columnIndex = 1, CONFIG.PICKER_COLUMNS do
+		local visibleIndex = ((rowIndex - 1) * CONFIG.PICKER_COLUMNS) + columnIndex
 		local itemButton =
 			pickerWindow:CreateChildWidget("button", "lootTrackerPickerItem" .. tostring(visibleIndex), 0, true)
 		itemButton.index = visibleIndex
 		itemButton:SetStyle("text_default")
 		itemButton:SetText("")
-		itemButton:SetExtent(PICKER_ITEM_WIDTH, PICKER_ITEM_HEIGHT)
+		itemButton:SetExtent(CONFIG.PICKER_ITEM_WIDTH, CONFIG.PICKER_ITEM_HEIGHT)
 		itemButton:AddAnchor(
 			"TOPLEFT",
 			pickerWindow,
-			PADDING + ((columnIndex - 1) * (PICKER_ITEM_WIDTH + PICKER_ITEM_GAP_X)),
-			PICKER_GRID_TOP + ((rowIndex - 1) * (PICKER_ITEM_HEIGHT + PICKER_ITEM_GAP_Y))
+			CONFIG.PADDING + ((columnIndex - 1) * (CONFIG.PICKER_ITEM_WIDTH + CONFIG.PICKER_ITEM_GAP_X)),
+			CONFIG.PICKER_GRID_TOP + ((rowIndex - 1) * (CONFIG.PICKER_ITEM_HEIGHT + CONFIG.PICKER_ITEM_GAP_Y))
 		)
 
 		local itemBg = itemButton:CreateColorDrawable(0.06, 0.06, 0.07, 0.54, "background")
 		itemBg:AddAnchor("TOPLEFT", itemButton, 0, 0)
-		itemBg:SetExtent(PICKER_ITEM_WIDTH, PICKER_ITEM_HEIGHT)
+		itemBg:SetExtent(CONFIG.PICKER_ITEM_WIDTH, CONFIG.PICKER_ITEM_HEIGHT)
 		itemButton.bg = itemBg
 
 		local itemHighlight = itemButton:CreateColorDrawable(1, 1, 1, 0.04, "overlay")
 		itemHighlight:AddAnchor("TOPLEFT", itemButton, 0, 0)
-		itemHighlight:SetExtent(PICKER_ITEM_WIDTH, 10)
+		itemHighlight:SetExtent(CONFIG.PICKER_ITEM_WIDTH, 10)
 		itemButton.highlight = itemHighlight
 
 		local itemIcon = itemButton:CreateIconDrawable("artwork")
@@ -2467,7 +2520,7 @@ for rowIndex = 1, PICKER_ROWS do
 		local itemNameLabel =
 			itemButton:CreateChildWidget("label", "lootTrackerPickerItemName" .. tostring(visibleIndex), 0, true)
 		itemNameLabel:SetText("")
-		itemNameLabel:SetExtent(PICKER_ITEM_WIDTH - 38, 18)
+		itemNameLabel:SetExtent(CONFIG.PICKER_ITEM_WIDTH - 38, 18)
 		itemNameLabel.style:SetAlign(ALIGN_LEFT)
 		itemNameLabel.style:SetFontSize(10)
 		itemNameLabel.style:SetColor(0.98, 0.98, 0.98, 1)
@@ -2479,7 +2532,7 @@ for rowIndex = 1, PICKER_ROWS do
 		local itemCountLabel =
 			itemButton:CreateChildWidget("label", "lootTrackerPickerItemCount" .. tostring(visibleIndex), 0, true)
 		itemCountLabel:SetText("")
-		itemCountLabel:SetExtent(PICKER_ITEM_WIDTH - 38, 14)
+		itemCountLabel:SetExtent(CONFIG.PICKER_ITEM_WIDTH - 38, 14)
 		itemCountLabel.style:SetAlign(ALIGN_LEFT)
 		itemCountLabel.style:SetFontSize(10)
 		itemCountLabel.style:SetColor(0.92, 0.86, 0.62, 1)
@@ -2538,9 +2591,9 @@ function pickerWindow:OnMouseWheel(delta)
 	-- Handles the OnMouseWheel event for the picker window. Scrolls the picker items up or down based on wheel delta.
 	local amount = tonumber(delta) or 0
 	if amount > 0 then
-		ScrollPicker(-PICKER_COLUMNS)
+		ScrollPicker(-CONFIG.PICKER_COLUMNS)
 	else
-		ScrollPicker(PICKER_COLUMNS)
+		ScrollPicker(CONFIG.PICKER_COLUMNS)
 	end
 end
 pickerWindow:SetHandler("OnMouseWheel", pickerWindow.OnMouseWheel)
@@ -2664,13 +2717,13 @@ function trackerWindow:OnUpdate(dt)
 	end
 	if isPickerOpen then
 		pickerSearchPollElapsed = pickerSearchPollElapsed + delta
-		if pickerSearchPollElapsed >= SEARCH_POLL_INTERVAL then
+		if pickerSearchPollElapsed >= CONFIG.SEARCH_POLL_INTERVAL then
 			pickerSearchPollElapsed = 0
 			PollPickerSearchBox()
 		end
 	end
 
-	if inventoryFallbackRefreshElapsed >= INVENTORY_FALLBACK_REFRESH_SECONDS then
+	if inventoryFallbackRefreshElapsed >= CONFIG.INVENTORY_FALLBACK_REFRESH_SECONDS then
 		inventoryFallbackRefreshElapsed = 0
 		MarkInventoryDirty()
 	end
