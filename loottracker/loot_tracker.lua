@@ -34,6 +34,9 @@ if previousRuntime ~= nil then
 	if previousRuntime.controlsRestoreButton ~= nil then
 		previousRuntime.controlsRestoreButton:Show(false)
 	end
+	if previousRuntime.lootRateTooltip ~= nil then
+		previousRuntime.lootRateTooltip:Show(false)
+	end
 	if previousRuntime.chatCommandListener ~= nil then
 		previousRuntime.chatCommandListener:Show(false)
 	end
@@ -52,6 +55,7 @@ local runtime = {
 	trackerScale = 1,
 	menuMode = false,
 	escMenuButtonRegistered = false,
+	lootRateMarker = nil,
 }
 _G.__LOOT_TRACKER_RUNTIME = runtime
 
@@ -65,6 +69,7 @@ local CONFIG = {
 	PICKER_POSITION_KEY = "lootTrackerPickerWindowPosition",
 	LAYOUT_KEY = "lootTrackerLayout",
 	MENU_MODE_KEY = "lootTrackerEscMenuMode",
+	DROP_RATE_KEY = "drop_rate_mul",
 
 	LAYOUT_HORIZONTAL = "horizontal",
 	LAYOUT_VERTICAL = "vertical",
@@ -85,6 +90,9 @@ local CONFIG = {
 	RESET_BUTTON_WIDTH = 24,
 	MENU_BUTTON_WIDTH = 34,
 	HIDE_WINDOW_BUTTON_WIDTH = 34,
+	LOOT_RATE_MARKER_WIDTH = 48,
+	LOOT_RATE_MARKER_HEIGHT = 18,
+	LOOT_RATE_TEXT_COLOR = { 0.28, 1.0, 0.36, 1 },
 	BOX_SIZE = 40,
 	BOX_GAP = 6,
 	TRACKER_ROW_TOP_GAP = 3,
@@ -727,11 +735,13 @@ function runtime:GetBaseWindowWidth()
 	if trackerLayout == CONFIG.LAYOUT_VERTICAL then
 		return CONFIG.BOX_SIZE
 			+ CONFIG.HEADER_BUTTON_GAP
-			+ math.max(CONFIG.HIDE_WINDOW_BUTTON_WIDTH, CONFIG.MENU_BUTTON_WIDTH)
+			+ math.max(CONFIG.HIDE_WINDOW_BUTTON_WIDTH, CONFIG.MENU_BUTTON_WIDTH, CONFIG.LOOT_RATE_MARKER_WIDTH)
 	end
 	return math.max(
 		self:GetBaseRowsSpan(),
 		CONFIG.HEADER_TITLE_WIDTH
+			+ CONFIG.LOOT_RATE_MARKER_WIDTH
+			+ CONFIG.HEADER_BUTTON_GAP
 			+ CONFIG.ROTATE_BUTTON_WIDTH
 			+ CONFIG.RESET_BUTTON_WIDTH
 			+ CONFIG.MENU_BUTTON_WIDTH
@@ -748,7 +758,7 @@ function runtime:GetBaseWindowHeight()
 		if not trackerHeaderControlsVisible then
 			return self:GetBaseRowsSpan()
 		end
-		return math.max(self:GetBaseRowsSpan(), (CONFIG.HEADER_BUTTON_HEIGHT * 7) + (CONFIG.HEADER_BUTTON_GAP * 6))
+		return math.max(self:GetBaseRowsSpan(), (CONFIG.HEADER_BUTTON_HEIGHT * 8) + (CONFIG.HEADER_BUTTON_GAP * 7))
 	end
 	if not trackerHeaderControlsVisible then
 		return CONFIG.BOX_SIZE
@@ -1250,6 +1260,58 @@ function runtime:SetMenuMode(enabled, shouldSave)
 	end
 end
 
+function runtime:GetPlayerDropRateMul()
+	if X2Unit == nil or type(X2Unit.UnitInfo) ~= "function" then
+		return nil
+	end
+
+	local ok, unitInfo = pcall(function()
+		return X2Unit:UnitInfo("player")
+	end)
+	if not ok or type(unitInfo) ~= "table" then
+		return nil
+	end
+
+	local valueOk, value = pcall(function()
+		return unitInfo[CONFIG.DROP_RATE_KEY]
+	end)
+	if valueOk then
+		return tonumber(value)
+	end
+	return nil
+end
+
+function runtime:FormatLootRatePercent()
+	local dropRateMul = self:GetPlayerDropRateMul()
+	if dropRateMul == nil then
+		return "N/A"
+	end
+
+	local percent = 100 + dropRateMul
+	if percent == math.floor(percent) then
+		return tostring(math.floor(percent)) .. "%"
+	end
+	return string.format("%.1f%%", percent)
+end
+
+function runtime:ApplyLootRateTextColor(label)
+	if label == nil or label.style == nil then
+		return
+	end
+	label.style:SetColor(
+		CONFIG.LOOT_RATE_TEXT_COLOR[1],
+		CONFIG.LOOT_RATE_TEXT_COLOR[2],
+		CONFIG.LOOT_RATE_TEXT_COLOR[3],
+		CONFIG.LOOT_RATE_TEXT_COLOR[4]
+	)
+end
+
+function runtime:UpdateLootRateMarkerText()
+	if self.lootRateMarker ~= nil then
+		self.lootRateMarker:SetText(self:FormatLootRatePercent())
+	end
+end
+
 if runtime.menuMode or _G.__LOOT_TRACKER_ESC_MENU_BUTTON_ADDED == true then
 	runtime:RegisterEscMenuButton()
 end
@@ -1299,6 +1361,16 @@ function headerLabel:OnDragStop()
 	end
 end
 headerLabel:SetHandler("OnDragStop", headerLabel.OnDragStop)
+
+runtime.lootRateMarker = trackerWindow:CreateChildWidget("label", "lootTrackerLootRateMarker", 0, true)
+runtime.lootRateMarker:SetText(runtime:FormatLootRatePercent())
+runtime.lootRateMarker:SetExtent(CONFIG.LOOT_RATE_MARKER_WIDTH, CONFIG.LOOT_RATE_MARKER_HEIGHT)
+runtime.lootRateMarker.style:SetAlign(ALIGN_CENTER)
+runtime.lootRateMarker.style:SetFontSize(12)
+runtime.lootRateMarker.style:SetOutline(true)
+runtime:ApplyLootRateTextColor(runtime.lootRateMarker)
+runtime.lootRateMarker:Show(false)
+SafeMethod(runtime.lootRateMarker, "EnablePick", false)
 
 local ToggleTrackerLayout
 
@@ -1391,6 +1463,10 @@ SetTrackerHeaderControlsVisible = function(visible)
 		runtime.addSlotButton:Show(visible)
 		runtime.removeSlotButton:Show(visible)
 		hideWindowButton:Show(visible)
+		if visible then
+			runtime:UpdateLootRateMarkerText()
+		end
+		runtime.lootRateMarker:Show(visible)
 		if runtime.SetResizeHandlesVisible ~= nil then
 			runtime:SetResizeHandlesVisible(visible)
 		end
@@ -1412,6 +1488,10 @@ SetTrackerHeaderControlsVisible = function(visible)
 	runtime.addSlotButton:Show(visible)
 	runtime.removeSlotButton:Show(visible)
 	hideWindowButton:Show(visible)
+	if visible then
+		runtime:UpdateLootRateMarkerText()
+	end
+	runtime.lootRateMarker:Show(visible)
 	if ApplyTrackerLayout ~= nil then
 		ApplyTrackerLayout()
 	end
@@ -1425,6 +1505,9 @@ SetTrackerHeaderControlsVisible = function(visible)
 			oldX + oldRowsLeft - GetTrackedRowsLeft(),
 			oldY + oldRowsTop - GetTrackedRowsTop()
 		)
+	end
+	if runtime.PositionResizeHandles ~= nil then
+		runtime:PositionResizeHandles()
 	end
 end
 
@@ -1468,6 +1551,9 @@ local function AnchorHeaderControls()
 	headerLabel:SetExtent(runtime:Scale(CONFIG.HEADER_TITLE_WIDTH), runtime:Scale(CONFIG.HEADER_HEIGHT))
 	headerLabel.style:SetAlign(ALIGN_LEFT)
 	headerLabel.style:SetFontSize(runtime:Scale(11))
+	runtime.lootRateMarker:SetExtent(runtime:Scale(CONFIG.LOOT_RATE_MARKER_WIDTH), runtime:Scale(CONFIG.LOOT_RATE_MARKER_HEIGHT))
+	runtime.lootRateMarker.style:SetFontSize(runtime:Scale(12))
+	runtime:ApplyLootRateTextColor(runtime.lootRateMarker)
 	rotateButton:SetExtent(runtime:Scale(CONFIG.ROTATE_BUTTON_WIDTH), runtime:Scale(CONFIG.HEADER_BUTTON_HEIGHT))
 	resetButton:SetExtent(runtime:Scale(CONFIG.RESET_BUTTON_WIDTH), runtime:Scale(CONFIG.HEADER_BUTTON_HEIGHT))
 	runtime.menuModeButton:SetExtent(runtime:Scale(CONFIG.MENU_BUTTON_WIDTH), runtime:Scale(CONFIG.HEADER_BUTTON_HEIGHT))
@@ -1477,20 +1563,29 @@ local function AnchorHeaderControls()
 	hideWindowButton:SetExtent(runtime:Scale(CONFIG.HIDE_WINDOW_BUTTON_WIDTH), runtime:Scale(CONFIG.HEADER_BUTTON_HEIGHT))
 
 	if trackerLayout == CONFIG.LAYOUT_VERTICAL then
-		local railButtonWidth = math.max(CONFIG.HIDE_WINDOW_BUTTON_WIDTH, CONFIG.MENU_BUTTON_WIDTH)
+		local railButtonWidth = math.max(CONFIG.HIDE_WINDOW_BUTTON_WIDTH, CONFIG.MENU_BUTTON_WIDTH, CONFIG.LOOT_RATE_MARKER_WIDTH)
 		local railLeft = runtime:Scale(CONFIG.BOX_SIZE + CONFIG.HEADER_BUTTON_GAP)
 		local narrowLeft = railLeft + math.floor((runtime:Scale(railButtonWidth) - runtime:Scale(CONFIG.RESET_BUTTON_WIDTH)) / 2)
+		local markerLeft = railLeft + math.floor((runtime:Scale(railButtonWidth) - runtime:Scale(CONFIG.LOOT_RATE_MARKER_WIDTH)) / 2)
 		headerLabel:Show(false)
 
+		runtime.lootRateMarker:RemoveAllAnchors()
+		runtime.lootRateMarker:AddAnchor("TOPLEFT", trackerWindow, markerLeft, 0)
+
 		rotateButton:RemoveAllAnchors()
-		rotateButton:AddAnchor("TOPLEFT", trackerWindow, narrowLeft, 0)
+		rotateButton:AddAnchor(
+			"TOPLEFT",
+			trackerWindow,
+			narrowLeft,
+			runtime:Scale(CONFIG.HEADER_BUTTON_HEIGHT + CONFIG.HEADER_BUTTON_GAP)
+		)
 
 		resetButton:RemoveAllAnchors()
 		resetButton:AddAnchor(
 			"TOPLEFT",
 			trackerWindow,
 			narrowLeft,
-			runtime:Scale(CONFIG.HEADER_BUTTON_HEIGHT + CONFIG.HEADER_BUTTON_GAP)
+			runtime:Scale((CONFIG.HEADER_BUTTON_HEIGHT * 2) + (CONFIG.HEADER_BUTTON_GAP * 2))
 		)
 
 		runtime.menuModeButton:RemoveAllAnchors()
@@ -1498,7 +1593,7 @@ local function AnchorHeaderControls()
 			"TOPLEFT",
 			trackerWindow,
 			railLeft,
-			runtime:Scale((CONFIG.HEADER_BUTTON_HEIGHT * 2) + (CONFIG.HEADER_BUTTON_GAP * 2))
+			runtime:Scale((CONFIG.HEADER_BUTTON_HEIGHT * 3) + (CONFIG.HEADER_BUTTON_GAP * 3))
 		)
 
 		runtime.killCounterButton:RemoveAllAnchors()
@@ -1506,7 +1601,7 @@ local function AnchorHeaderControls()
 			"TOPLEFT",
 			trackerWindow,
 			narrowLeft,
-			runtime:Scale((CONFIG.HEADER_BUTTON_HEIGHT * 3) + (CONFIG.HEADER_BUTTON_GAP * 3))
+			runtime:Scale((CONFIG.HEADER_BUTTON_HEIGHT * 4) + (CONFIG.HEADER_BUTTON_GAP * 4))
 		)
 
 		runtime.addSlotButton:RemoveAllAnchors()
@@ -1514,7 +1609,7 @@ local function AnchorHeaderControls()
 			"TOPLEFT",
 			trackerWindow,
 			narrowLeft,
-			runtime:Scale((CONFIG.HEADER_BUTTON_HEIGHT * 4) + (CONFIG.HEADER_BUTTON_GAP * 4))
+			runtime:Scale((CONFIG.HEADER_BUTTON_HEIGHT * 5) + (CONFIG.HEADER_BUTTON_GAP * 5))
 		)
 
 		runtime.removeSlotButton:RemoveAllAnchors()
@@ -1522,7 +1617,7 @@ local function AnchorHeaderControls()
 			"TOPLEFT",
 			trackerWindow,
 			narrowLeft,
-			runtime:Scale((CONFIG.HEADER_BUTTON_HEIGHT * 5) + (CONFIG.HEADER_BUTTON_GAP * 5))
+			runtime:Scale((CONFIG.HEADER_BUTTON_HEIGHT * 6) + (CONFIG.HEADER_BUTTON_GAP * 6))
 		)
 
 		hideWindowButton:RemoveAllAnchors()
@@ -1530,13 +1625,21 @@ local function AnchorHeaderControls()
 			"TOPLEFT",
 			trackerWindow,
 			railLeft,
-			runtime:Scale((CONFIG.HEADER_BUTTON_HEIGHT * 6) + (CONFIG.HEADER_BUTTON_GAP * 6))
+			runtime:Scale((CONFIG.HEADER_BUTTON_HEIGHT * 7) + (CONFIG.HEADER_BUTTON_GAP * 7))
 		)
 		return
 	end
 
 	headerLabel:Show(trackerHeaderControlsVisible)
 	headerLabel:AddAnchor("TOPLEFT", trackerWindow, runtime:Scale(CONFIG.TRACKER_PADDING), runtime:Scale(CONFIG.TRACKER_TOP_PADDING + 2))
+
+	runtime.lootRateMarker:RemoveAllAnchors()
+	runtime.lootRateMarker:AddAnchor(
+		"TOPLEFT",
+		trackerWindow,
+		runtime:Scale(CONFIG.TRACKER_PADDING + CONFIG.HEADER_TITLE_WIDTH + CONFIG.HEADER_BUTTON_GAP),
+		runtime:Scale(CONFIG.TRACKER_TOP_PADDING + 1)
+	)
 
 	hideWindowButton:RemoveAllAnchors()
 	hideWindowButton:AddAnchor("TOPRIGHT", trackerWindow, -runtime:Scale(CONFIG.TRACKER_PADDING), runtime:Scale(CONFIG.TRACKER_TOP_PADDING + 1))
@@ -1907,19 +2010,39 @@ function runtime:PositionResizeHandles()
 		return
 	end
 
-	local width = GetTrackerWindowWidth()
-	local height = GetTrackerWindowHeight()
 	local handleSize = self:Scale(18)
+	local boxSize = self:Scale(CONFIG.BOX_SIZE)
+	local boxGap = self:Scale(CONFIG.BOX_GAP)
+	local firstBoxX = x + GetTrackedRowsLeft()
+	local firstBoxY = y + GetTrackedRowsTop()
+	local lastBoxX = firstBoxX
+	local lastBoxY = firstBoxY
+	if trackerLayout == CONFIG.LAYOUT_VERTICAL then
+		lastBoxY = firstBoxY + ((TRACKED_SLOT_COUNT - 1) * (boxSize + boxGap))
+	else
+		lastBoxX = firstBoxX + ((TRACKED_SLOT_COUNT - 1) * (boxSize + boxGap))
+	end
 	for _, handle in ipairs(self.resizeHandles) do
 		if handle ~= nil and not handle.isResizing then
 			self:LayoutResizeGrip(handle)
-			local handleX = x
-			local handleY = y
-			if not handle.resizeFromLeft then
-				handleX = x + width - handleSize
+			local boxX = firstBoxX
+			local boxY = firstBoxY
+			if trackerLayout == CONFIG.LAYOUT_VERTICAL then
+				if not handle.resizeFromTop then
+					boxX = lastBoxX
+					boxY = lastBoxY
+				end
+			elseif not handle.resizeFromLeft then
+				boxX = lastBoxX
+				boxY = lastBoxY
 			end
+			local handleX = boxX
+			local handleY = boxY
 			if not handle.resizeFromTop then
-				handleY = y + height - handleSize
+				handleY = boxY + boxSize - handleSize
+			end
+			if not handle.resizeFromLeft then
+				handleX = boxX + boxSize - handleSize
 			end
 			AnchorWidgetAtSavedPosition(handle, handleX, handleY)
 			SafeMethod(handle, "Raise")
