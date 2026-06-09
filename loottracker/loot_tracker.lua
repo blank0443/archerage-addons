@@ -28,6 +28,9 @@ if previousRuntime ~= nil then
 	if previousRuntime.pickerWindow ~= nil then
 		previousRuntime.pickerWindow:Show(false)
 	end
+	if previousRuntime.setWindow ~= nil then
+		previousRuntime.setWindow:Show(false)
+	end
 	if previousRuntime.restoreButton ~= nil then
 		previousRuntime.restoreButton:Show(false)
 	end
@@ -49,9 +52,25 @@ local runtime = {
 	active = true,
 	window = nil,
 	pickerWindow = nil,
+	setWindow = nil,
 	restoreButton = nil,
 	chatCommandListener = nil,
 	resizeHandles = {},
+	trackedItemSets = {},
+	trackerSetRows = {},
+	selectedSetName = nil,
+	setNameText = "",
+	setNameInputAcceptingKeys = false,
+	setNameCharHandlerActive = false,
+	setNameLastKeyText = nil,
+	setNameLastKeyElapsed = 0,
+	setNameLastCharText = nil,
+	setNameLastCharElapsed = 0,
+	setNameIgnoreNextKeyText = nil,
+	setNameIgnoreNextKeyElapsed = 0,
+	setNameShiftDown = false,
+	setNameInputSyncingText = false,
+	setNameEraseHandledOnKeyDown = false,
 	trackerScale = 1,
 	menuMode = false,
 	escMenuButtonRegistered = false,
@@ -67,9 +86,13 @@ local CONFIG = {
 	POSITION_KEY = "lootTrackerWindowPosition",
 	RESTORE_POSITION_KEY = "lootTrackerRestoreButtonPosition",
 	PICKER_POSITION_KEY = "lootTrackerPickerWindowPosition",
+	SET_WINDOW_POSITION_KEY = "lootTrackerSetWindowPosition",
 	LAYOUT_KEY = "lootTrackerLayout",
 	MENU_MODE_KEY = "lootTrackerEscMenuMode",
+	SETS_KEY = "lootTrackerTrackedItemSets",
 	DROP_RATE_KEY = "drop_rate_mul",
+	SET_NAME_DUPLICATE_KEY_SUPPRESS_SECONDS = 0.03,
+	SET_NAME_CHAR_KEY_SUPPRESS_SECONDS = 0.12,
 
 	LAYOUT_HORIZONTAL = "horizontal",
 	LAYOUT_VERTICAL = "vertical",
@@ -90,6 +113,7 @@ local CONFIG = {
 	RESET_BUTTON_WIDTH = 24,
 	MENU_BUTTON_WIDTH = 34,
 	HIDE_WINDOW_BUTTON_WIDTH = 34,
+	SET_BUTTON_WIDTH = 24,
 	LOOT_RATE_MARKER_WIDTH = 48,
 	LOOT_RATE_MARKER_HEIGHT = 18,
 	LOOT_RATE_TEXT_COLOR = { 0.28, 1.0, 0.36, 1 },
@@ -108,6 +132,19 @@ local CONFIG = {
 	PICKER_SEARCH_TOP = 42,
 	PICKER_SEARCH_HEIGHT = 30,
 	PICKER_GRID_TOP = 84,
+	SET_WINDOW_WIDTH = 200,
+	SET_WINDOW_MIN_HEIGHT = 132,
+	SET_ROW_TOP = 104,
+	SET_ROW_HEIGHT = 26,
+	SET_ROW_GAP = 4,
+	SET_WINDOW_PADDING = 10,
+	SET_ACTION_BUTTON_HEIGHT = 22,
+	SET_SAVE_BUTTON_WIDTH = 44,
+	SET_OVERWRITE_BUTTON_WIDTH = 88,
+	SET_DELETE_BUTTON_WIDTH = 36,
+	SET_STATUS_OUTSIDE_GAP = 4,
+	SET_NAME_CHAR_WIDTH = 7,
+	SET_NAME_TEXT_MAX_WIDTH = 136,
 	INVENTORY_FALLBACK_REFRESH_SECONDS = 2.0,
 	SEARCH_POLL_INTERVAL = 0.12,
 }
@@ -115,6 +152,7 @@ CONFIG.BOXES_TOP = CONFIG.TRACKER_TOP_PADDING + CONFIG.HEADER_HEIGHT + CONFIG.TR
 CONFIG.PICKER_VISIBLE_COUNT = CONFIG.PICKER_COLUMNS * CONFIG.PICKER_ROWS
 CONFIG.PICKER_CONTROL_TOP = CONFIG.PICKER_GRID_TOP
 	+ (CONFIG.PICKER_ROWS * (CONFIG.PICKER_ITEM_HEIGHT + CONFIG.PICKER_ITEM_GAP_Y))
+CONFIG.SET_WINDOW_CONTENT_WIDTH = CONFIG.SET_WINDOW_WIDTH - (CONFIG.SET_WINDOW_PADDING * 2)
 
 local trackedItems = {}
 local rowWidgets = {}
@@ -744,12 +782,13 @@ function runtime:GetBaseWindowWidth()
 			+ CONFIG.HEADER_BUTTON_GAP
 			+ CONFIG.ROTATE_BUTTON_WIDTH
 			+ CONFIG.RESET_BUTTON_WIDTH
+			+ CONFIG.SET_BUTTON_WIDTH
 			+ CONFIG.MENU_BUTTON_WIDTH
 			+ CONFIG.RESET_BUTTON_WIDTH
 			+ CONFIG.RESET_BUTTON_WIDTH
 			+ CONFIG.RESET_BUTTON_WIDTH
 			+ CONFIG.HIDE_WINDOW_BUTTON_WIDTH
-			+ (CONFIG.HEADER_BUTTON_GAP * 7)
+			+ (CONFIG.HEADER_BUTTON_GAP * 8)
 	) + (CONFIG.TRACKER_PADDING * 2)
 end
 
@@ -758,7 +797,7 @@ function runtime:GetBaseWindowHeight()
 		if not trackerHeaderControlsVisible then
 			return self:GetBaseRowsSpan()
 		end
-		return math.max(self:GetBaseRowsSpan(), (CONFIG.HEADER_BUTTON_HEIGHT * 8) + (CONFIG.HEADER_BUTTON_GAP * 7))
+		return math.max(self:GetBaseRowsSpan(), (CONFIG.HEADER_BUTTON_HEIGHT * 9) + (CONFIG.HEADER_BUTTON_GAP * 8))
 	end
 	if not trackerHeaderControlsVisible then
 		return CONFIG.BOX_SIZE
@@ -1159,6 +1198,9 @@ local function CenterLootTrackerWindow()
 	runtime.trackerScale = 1
 	runtime:SaveWindowScale()
 	restoreButton:Show(false)
+	if runtime.setWindow ~= nil then
+		runtime.setWindow:Show(false)
+	end
 	trackerWindow:Show(true)
 	if SetTrackerHeaderControlsVisible ~= nil then
 		SetTrackerHeaderControlsVisible(true)
@@ -1187,6 +1229,9 @@ local function HideLootTrackerWindow()
 	end
 	SaveWindowPosition(trackerWindow)
 	ClosePicker()
+	if runtime.setWindow ~= nil then
+		runtime.setWindow:Show(false)
+	end
 	if runtime.menuMode then
 		trackerWindow:Show(false)
 		restoreButton:Show(false)
@@ -1404,6 +1449,18 @@ function runtime.menuModeButton:OnClick()
 end
 runtime.menuModeButton:SetHandler("OnClick", runtime.menuModeButton.OnClick)
 
+runtime.setManagerButton = trackerWindow:CreateChildWidget("button", "lootTrackerSetManagerButton", 0, true)
+runtime.setManagerButton:SetStyle("text_default")
+runtime.setManagerButton:SetText("S")
+runtime.setManagerButton:SetExtent(CONFIG.SET_BUTTON_WIDTH, 18)
+
+function runtime.setManagerButton:OnClick()
+	if runtime.ToggleTrackerSetWindow ~= nil then
+		runtime:ToggleTrackerSetWindow()
+	end
+end
+runtime.setManagerButton:SetHandler("OnClick", runtime.setManagerButton.OnClick)
+
 runtime.killCounterButton = trackerWindow:CreateChildWidget("button", "lootTrackerKillCounterButton", 0, true)
 runtime.killCounterButton:SetStyle("text_default")
 runtime.killCounterButton:SetText("K")
@@ -1459,6 +1516,7 @@ SetTrackerHeaderControlsVisible = function(visible)
 		rotateButton:Show(visible)
 		resetButton:Show(visible)
 		runtime.menuModeButton:Show(visible)
+		runtime.setManagerButton:Show(visible)
 		runtime.killCounterButton:Show(visible)
 		runtime.addSlotButton:Show(visible)
 		runtime.removeSlotButton:Show(visible)
@@ -1484,6 +1542,7 @@ SetTrackerHeaderControlsVisible = function(visible)
 	rotateButton:Show(visible)
 	resetButton:Show(visible)
 	runtime.menuModeButton:Show(visible)
+	runtime.setManagerButton:Show(visible)
 	runtime.killCounterButton:Show(visible)
 	runtime.addSlotButton:Show(visible)
 	runtime.removeSlotButton:Show(visible)
@@ -1540,6 +1599,7 @@ headerLabel:SetHandler("OnEnter", headerLabel.OnEnter)
 rotateButton:SetHandler("OnEnter", ShowTrackerHeaderControls)
 resetButton:SetHandler("OnEnter", ShowTrackerHeaderControls)
 runtime.menuModeButton:SetHandler("OnEnter", ShowTrackerHeaderControls)
+runtime.setManagerButton:SetHandler("OnEnter", ShowTrackerHeaderControls)
 runtime.killCounterButton:SetHandler("OnEnter", ShowTrackerHeaderControls)
 runtime.addSlotButton:SetHandler("OnEnter", ShowTrackerHeaderControls)
 runtime.removeSlotButton:SetHandler("OnEnter", ShowTrackerHeaderControls)
@@ -1557,15 +1617,24 @@ local function AnchorHeaderControls()
 	rotateButton:SetExtent(runtime:Scale(CONFIG.ROTATE_BUTTON_WIDTH), runtime:Scale(CONFIG.HEADER_BUTTON_HEIGHT))
 	resetButton:SetExtent(runtime:Scale(CONFIG.RESET_BUTTON_WIDTH), runtime:Scale(CONFIG.HEADER_BUTTON_HEIGHT))
 	runtime.menuModeButton:SetExtent(runtime:Scale(CONFIG.MENU_BUTTON_WIDTH), runtime:Scale(CONFIG.HEADER_BUTTON_HEIGHT))
+	runtime.setManagerButton:SetExtent(runtime:Scale(CONFIG.SET_BUTTON_WIDTH), runtime:Scale(CONFIG.HEADER_BUTTON_HEIGHT))
 	runtime.killCounterButton:SetExtent(runtime:Scale(CONFIG.RESET_BUTTON_WIDTH), runtime:Scale(CONFIG.HEADER_BUTTON_HEIGHT))
 	runtime.addSlotButton:SetExtent(runtime:Scale(CONFIG.RESET_BUTTON_WIDTH), runtime:Scale(CONFIG.HEADER_BUTTON_HEIGHT))
 	runtime.removeSlotButton:SetExtent(runtime:Scale(CONFIG.RESET_BUTTON_WIDTH), runtime:Scale(CONFIG.HEADER_BUTTON_HEIGHT))
 	hideWindowButton:SetExtent(runtime:Scale(CONFIG.HIDE_WINDOW_BUTTON_WIDTH), runtime:Scale(CONFIG.HEADER_BUTTON_HEIGHT))
 
 	if trackerLayout == CONFIG.LAYOUT_VERTICAL then
-		local railButtonWidth = math.max(CONFIG.HIDE_WINDOW_BUTTON_WIDTH, CONFIG.MENU_BUTTON_WIDTH, CONFIG.LOOT_RATE_MARKER_WIDTH)
+		local railButtonWidth = math.max(
+			CONFIG.HIDE_WINDOW_BUTTON_WIDTH,
+			CONFIG.MENU_BUTTON_WIDTH,
+			CONFIG.SET_BUTTON_WIDTH,
+			CONFIG.RESET_BUTTON_WIDTH,
+			CONFIG.LOOT_RATE_MARKER_WIDTH
+		)
 		local railLeft = runtime:Scale(CONFIG.BOX_SIZE + CONFIG.HEADER_BUTTON_GAP)
 		local narrowLeft = railLeft + math.floor((runtime:Scale(railButtonWidth) - runtime:Scale(CONFIG.RESET_BUTTON_WIDTH)) / 2)
+		local menuLeft = railLeft + math.floor((runtime:Scale(railButtonWidth) - runtime:Scale(CONFIG.MENU_BUTTON_WIDTH)) / 2)
+		local hideLeft = railLeft + math.floor((runtime:Scale(railButtonWidth) - runtime:Scale(CONFIG.HIDE_WINDOW_BUTTON_WIDTH)) / 2)
 		local markerLeft = railLeft + math.floor((runtime:Scale(railButtonWidth) - runtime:Scale(CONFIG.LOOT_RATE_MARKER_WIDTH)) / 2)
 		headerLabel:Show(false)
 
@@ -1588,12 +1657,20 @@ local function AnchorHeaderControls()
 			runtime:Scale((CONFIG.HEADER_BUTTON_HEIGHT * 2) + (CONFIG.HEADER_BUTTON_GAP * 2))
 		)
 
+		runtime.setManagerButton:RemoveAllAnchors()
+		runtime.setManagerButton:AddAnchor(
+			"TOPLEFT",
+			trackerWindow,
+			narrowLeft,
+			runtime:Scale((CONFIG.HEADER_BUTTON_HEIGHT * 3) + (CONFIG.HEADER_BUTTON_GAP * 3))
+		)
+
 		runtime.menuModeButton:RemoveAllAnchors()
 		runtime.menuModeButton:AddAnchor(
 			"TOPLEFT",
 			trackerWindow,
-			railLeft,
-			runtime:Scale((CONFIG.HEADER_BUTTON_HEIGHT * 3) + (CONFIG.HEADER_BUTTON_GAP * 3))
+			menuLeft,
+			runtime:Scale((CONFIG.HEADER_BUTTON_HEIGHT * 4) + (CONFIG.HEADER_BUTTON_GAP * 4))
 		)
 
 		runtime.killCounterButton:RemoveAllAnchors()
@@ -1601,7 +1678,7 @@ local function AnchorHeaderControls()
 			"TOPLEFT",
 			trackerWindow,
 			narrowLeft,
-			runtime:Scale((CONFIG.HEADER_BUTTON_HEIGHT * 4) + (CONFIG.HEADER_BUTTON_GAP * 4))
+			runtime:Scale((CONFIG.HEADER_BUTTON_HEIGHT * 5) + (CONFIG.HEADER_BUTTON_GAP * 5))
 		)
 
 		runtime.addSlotButton:RemoveAllAnchors()
@@ -1609,7 +1686,7 @@ local function AnchorHeaderControls()
 			"TOPLEFT",
 			trackerWindow,
 			narrowLeft,
-			runtime:Scale((CONFIG.HEADER_BUTTON_HEIGHT * 5) + (CONFIG.HEADER_BUTTON_GAP * 5))
+			runtime:Scale((CONFIG.HEADER_BUTTON_HEIGHT * 6) + (CONFIG.HEADER_BUTTON_GAP * 6))
 		)
 
 		runtime.removeSlotButton:RemoveAllAnchors()
@@ -1617,15 +1694,15 @@ local function AnchorHeaderControls()
 			"TOPLEFT",
 			trackerWindow,
 			narrowLeft,
-			runtime:Scale((CONFIG.HEADER_BUTTON_HEIGHT * 6) + (CONFIG.HEADER_BUTTON_GAP * 6))
+			runtime:Scale((CONFIG.HEADER_BUTTON_HEIGHT * 7) + (CONFIG.HEADER_BUTTON_GAP * 7))
 		)
 
 		hideWindowButton:RemoveAllAnchors()
 		hideWindowButton:AddAnchor(
 			"TOPLEFT",
 			trackerWindow,
-			railLeft,
-			runtime:Scale((CONFIG.HEADER_BUTTON_HEIGHT * 7) + (CONFIG.HEADER_BUTTON_GAP * 7))
+			hideLeft,
+			runtime:Scale((CONFIG.HEADER_BUTTON_HEIGHT * 8) + (CONFIG.HEADER_BUTTON_GAP * 8))
 		)
 		return
 	end
@@ -1694,6 +1771,26 @@ local function AnchorHeaderControls()
 		runtime:Scale(CONFIG.TRACKER_TOP_PADDING + 1)
 	)
 
+	runtime.setManagerButton:RemoveAllAnchors()
+	runtime.setManagerButton:AddAnchor(
+		"TOPRIGHT",
+		trackerWindow,
+		-runtime:Scale(
+			CONFIG.TRACKER_PADDING
+				+ CONFIG.HIDE_WINDOW_BUTTON_WIDTH
+				+ CONFIG.HEADER_BUTTON_GAP
+				+ CONFIG.RESET_BUTTON_WIDTH
+				+ CONFIG.HEADER_BUTTON_GAP
+				+ CONFIG.RESET_BUTTON_WIDTH
+				+ CONFIG.HEADER_BUTTON_GAP
+				+ CONFIG.RESET_BUTTON_WIDTH
+				+ CONFIG.HEADER_BUTTON_GAP
+				+ CONFIG.MENU_BUTTON_WIDTH
+				+ CONFIG.HEADER_BUTTON_GAP
+		),
+		runtime:Scale(CONFIG.TRACKER_TOP_PADDING + 1)
+	)
+
 	resetButton:RemoveAllAnchors()
 	resetButton:AddAnchor(
 		"TOPRIGHT",
@@ -1709,6 +1806,8 @@ local function AnchorHeaderControls()
 				+ CONFIG.RESET_BUTTON_WIDTH
 				+ CONFIG.HEADER_BUTTON_GAP
 				+ CONFIG.MENU_BUTTON_WIDTH
+				+ CONFIG.HEADER_BUTTON_GAP
+				+ CONFIG.SET_BUTTON_WIDTH
 				+ CONFIG.HEADER_BUTTON_GAP
 		),
 		runtime:Scale(CONFIG.TRACKER_TOP_PADDING + 1)
@@ -1731,6 +1830,8 @@ local function AnchorHeaderControls()
 				+ CONFIG.RESET_BUTTON_WIDTH
 				+ CONFIG.HEADER_BUTTON_GAP
 				+ CONFIG.MENU_BUTTON_WIDTH
+				+ CONFIG.HEADER_BUTTON_GAP
+				+ CONFIG.SET_BUTTON_WIDTH
 				+ CONFIG.HEADER_BUTTON_GAP
 		),
 		runtime:Scale(CONFIG.TRACKER_TOP_PADDING + 1)
@@ -2482,6 +2583,16 @@ local function IsClearSearchKey(value)
 	return token == "escape" or token == "esc" or token == "27"
 end
 
+local function IsShiftKey(value)
+	local token = NormalizeKeyToken(value)
+	return token == "shift"
+		or token == "lshift"
+		or token == "rshift"
+		or token == "leftshift"
+		or token == "rightshift"
+		or token == "16"
+end
+
 local function FirstPrintableStringArg(...)
 	-- Extracts the first printable string arg from varargs, handling numbers as chars if in range.
 	for i = 1, select("#", ...) do
@@ -2556,6 +2667,36 @@ local function SearchCharacterFromKey(value)
 	end
 
 	return nil
+end
+
+local function IsCurrentSetNameShiftDown()
+	if runtime.setNameShiftDown == true then
+		return true
+	end
+	if type(IsShiftKeyDown) == "function" then
+		local ok, result = pcall(IsShiftKeyDown)
+		if ok and result == true then
+			return true
+		end
+	end
+	return false
+end
+
+local function ApplySetNameShiftToCharacter(character)
+	if character == nil then
+		return nil
+	end
+
+	local text = tostring(character or "")
+	if string.len(text) ~= 1 or not IsCurrentSetNameShiftDown() then
+		return text
+	end
+
+	local byte = string.byte(text, 1)
+	if byte ~= nil and byte >= 97 and byte <= 122 then
+		return string.upper(text)
+	end
+	return text
 end
 
 local function ApplyPickerSearchText(nextSearchText, syncSearchBox)
@@ -2761,6 +2902,945 @@ local function AttachPickerSearchHandlers(searchBox)
 end
 
 AttachPickerSearchHandlers(pickerSearchBox)
+
+function runtime:CopyTrackedItem(item)
+	if type(item) ~= "table" or item.name == nil then
+		return nil
+	end
+
+	local itemName = tostring(item.name)
+	local itemGrade = item.grade
+	local itemIconPath = item.iconPath
+	return {
+		key = item.key or BuildItemKey(itemName, itemGrade, itemIconPath) or NormalizeName(itemName),
+		name = itemName,
+		grade = itemGrade,
+		iconPath = itemIconPath,
+	}
+end
+
+function runtime:LoadTrackedItemSets()
+	self.trackedItemSets = {}
+	local ok, data = pcall(function()
+		return ADDON:LoadData(CONFIG.SETS_KEY)
+	end)
+	if not ok or type(data) ~= "table" then
+		return
+	end
+
+	for setName, setData in pairs(data) do
+		local normalizedName = Trim(setName)
+		if normalizedName ~= "" and type(setData) == "table" then
+			local displayName = Trim(setData.name or setData.displayName or setName)
+			if displayName == "" then
+				displayName = normalizedName
+			end
+			local itemsSource = setData.items
+			if type(itemsSource) ~= "table" then
+				itemsSource = setData
+			end
+
+			local slotCount = math.floor(tonumber(setData.slotCount or setData.count) or TRACKED_SLOT_COUNT)
+			if slotCount < 1 then
+				slotCount = 1
+			elseif slotCount > 20 then
+				slotCount = 20
+			end
+
+			local normalizedSet = {
+				name = displayName,
+				slotCount = slotCount,
+				items = {},
+			}
+			for index = 1, slotCount do
+				local item = itemsSource[index] or itemsSource[tostring(index)]
+				local copied = self:CopyTrackedItem(item)
+				if copied ~= nil then
+					normalizedSet.items[index] = copied
+				end
+			end
+			self.trackedItemSets[normalizedName] = normalizedSet
+		end
+	end
+end
+
+function runtime:SaveTrackedItemSets()
+	local ok = pcall(function()
+		ADDON:ClearData(CONFIG.SETS_KEY)
+		ADDON:SaveData(CONFIG.SETS_KEY, self.trackedItemSets)
+	end)
+	return ok
+end
+
+function runtime:GetTrackedSetDisplayName(setName)
+	local setData = self.trackedItemSets[setName]
+	if type(setData) == "table" then
+		local displayName = Trim(setData.name or setData.displayName)
+		if displayName ~= "" then
+			return displayName
+		end
+	end
+	return tostring(setName or "")
+end
+
+function runtime:FindTrackedSetKeyByName(setName)
+	local exactName = Trim(setName)
+	if exactName == "" then
+		return nil
+	end
+	if self.trackedItemSets[exactName] ~= nil then
+		return exactName
+	end
+
+	local lookupName = string.lower(exactName)
+	for savedName, setData in pairs(self.trackedItemSets or {}) do
+		if string.lower(Trim(savedName)) == lookupName then
+			return savedName
+		end
+		if type(setData) == "table" and string.lower(Trim(setData.name or setData.displayName)) == lookupName then
+			return savedName
+		end
+	end
+	return nil
+end
+
+function runtime:GetSortedTrackedSetNames()
+	local names = {}
+	for setName, _ in pairs(self.trackedItemSets or {}) do
+		names[#names + 1] = setName
+	end
+	table.sort(names, function(left, right)
+		local leftDisplay = string.lower(self:GetTrackedSetDisplayName(left))
+		local rightDisplay = string.lower(self:GetTrackedSetDisplayName(right))
+		if leftDisplay == rightDisplay then
+			return tostring(left) < tostring(right)
+		end
+		return leftDisplay < rightDisplay
+	end)
+	return names
+end
+
+function runtime:GetTrackedSetItemCount(setData)
+	local count = 0
+	if type(setData) ~= "table" or type(setData.items) ~= "table" then
+		return count
+	end
+	for _, item in pairs(setData.items) do
+		if type(item) == "table" and item.name ~= nil then
+			count = count + 1
+		end
+	end
+	return count
+end
+
+function runtime:CaptureTrackedSet()
+	local captured = {
+		slotCount = TRACKED_SLOT_COUNT,
+		items = {},
+	}
+	local itemCount = 0
+	for index = 1, TRACKED_SLOT_COUNT do
+		local copied = self:CopyTrackedItem(trackedItems[index])
+		if copied ~= nil then
+			captured.items[index] = copied
+			itemCount = itemCount + 1
+		end
+	end
+	return captured, itemCount
+end
+
+function runtime:GetTrackerSetNameDisplayText(setName)
+	local text = self:GetTrackedSetDisplayName(setName)
+	local maxChars = math.floor(CONFIG.SET_NAME_TEXT_MAX_WIDTH / CONFIG.SET_NAME_CHAR_WIDTH)
+	if maxChars < 4 or string.len(text) <= maxChars then
+		return text
+	end
+	return string.sub(text, 1, maxChars - 3) .. "..."
+end
+
+function runtime:GetTrackerSetWindowHeight(setCount)
+	local rowsHeight = 0
+	if setCount > 0 then
+		rowsHeight = (setCount * CONFIG.SET_ROW_HEIGHT) + ((setCount - 1) * CONFIG.SET_ROW_GAP)
+	end
+
+	local height = CONFIG.SET_ROW_TOP + rowsHeight + CONFIG.SET_WINDOW_PADDING
+	if height < CONFIG.SET_WINDOW_MIN_HEIGHT then
+		return CONFIG.SET_WINDOW_MIN_HEIGHT
+	end
+	return height
+end
+
+function runtime:UpdateTrackerSetWindowSize(setCount)
+	if self.setWindow == nil then
+		return
+	end
+	local height = self:GetTrackerSetWindowHeight(setCount or 0)
+	self.setWindow:SetExtent(CONFIG.SET_WINDOW_WIDTH, height)
+	if self.setWindow.statusLabel ~= nil then
+		self.setWindow.statusLabel:RemoveAllAnchors()
+		self.setWindow.statusLabel:AddAnchor("TOP", self.setWindow, 0, height + CONFIG.SET_STATUS_OUTSIDE_GAP)
+	end
+end
+
+function runtime:SetTrackerSetStatus(message, red, green, blue)
+	if self.setWindow == nil or self.setWindow.statusLabel == nil then
+		return
+	end
+	local text = tostring(message or "")
+	self.setWindow.statusLabel:SetText(text)
+	if self.setWindow.statusLabel.style ~= nil then
+		self.setWindow.statusLabel.style:SetColor(red or 0.9, green or 0.86, blue or 0.66, 1)
+	end
+	self.setWindow.statusLabel:Show(text ~= "")
+end
+
+function runtime:SyncSetNameInputWidgetText(text, clearWhenEmpty)
+	local value = tostring(text or "")
+	local input = self.setNameInput
+	if input == nil then
+		return
+	end
+
+	self.setNameInputSyncingText = true
+	SafeMethod(input, "SetText", value)
+	SafeMethod(input, "SetInputText", value)
+	SafeMethod(input, "SetEditText", value)
+	SafeMethod(input, "SetDisplayText", value)
+	SafeMethod(input, "SetString", value)
+	if clearWhenEmpty == true and value == "" then
+		SafeMethod(input, "ClearText")
+		SafeMethod(input, "ClearInputText")
+		SafeMethod(input, "ClearEditText")
+	end
+	self.setNameInputSyncingText = false
+end
+
+function runtime:ApplySetNameInputText(text)
+	local value = tostring(text or "")
+	self.setNameText = value
+	self:SyncSetNameInputWidgetText(value, false)
+end
+
+function runtime:ResetSetNameInputPending()
+	self.setNameCharHandlerActive = false
+	self.setNameLastKeyText = nil
+	self.setNameLastKeyElapsed = 0
+	self.setNameLastCharText = nil
+	self.setNameLastCharElapsed = 0
+	self.setNameIgnoreNextKeyText = nil
+	self.setNameIgnoreNextKeyElapsed = 0
+	self.setNameShiftDown = false
+	self.setNameEraseHandledOnKeyDown = false
+end
+
+function runtime:ReplaceLastSetNameInputText(text)
+	self:ApplySetNameInputText(DropLastSearchCharacter(self.setNameText) .. tostring(text or ""))
+end
+
+function runtime:SyncSetNameInputText(text)
+	local value = tostring(text or "")
+	self:ApplySetNameInputText(value)
+	self:ResetSetNameInputPending()
+	self.setNameInputAcceptingKeys = false
+
+	self:SyncSetNameInputWidgetText(value, value == "")
+	if self.setNameInput == nil then
+		return
+	end
+	if value == "" then
+		SafeMethod(self.setNameInput, "ClearFocus")
+		SafeMethod(self.setNameInput, "SetFocus", false)
+	end
+end
+
+function runtime:AppendSetNameInputText(text)
+	if text == nil or text == "" then
+		return
+	end
+	local value = tostring(text)
+	if string.len(value) > 1 then
+		self:ApplySetNameInputText(value)
+	else
+		self:ApplySetNameInputText(self.setNameText .. value)
+	end
+end
+
+local function HasUppercaseAscii(value)
+	return string.find(tostring(value or ""), "%u") ~= nil
+end
+
+local function CapitalizeSetNameWords(value)
+	local text = Trim(value)
+	local result = {}
+	local capitalizeNext = true
+	for index = 1, string.len(text) do
+		local character = string.sub(text, index, index)
+		local byte = string.byte(character, 1)
+		if byte ~= nil and byte >= 97 and byte <= 122 and capitalizeNext then
+			result[#result + 1] = string.upper(character)
+			capitalizeNext = false
+		else
+			result[#result + 1] = character
+			if byte ~= nil and ((byte >= 65 and byte <= 90) or (byte >= 97 and byte <= 122) or (byte >= 48 and byte <= 57)) then
+				capitalizeNext = false
+			else
+				capitalizeNext = true
+			end
+		end
+	end
+	return table.concat(result)
+end
+
+function runtime:NormalizeSavedSetName(value)
+	local text = Trim(value)
+	if text == "" or HasUppercaseAscii(text) then
+		return text
+	end
+	return CapitalizeSetNameWords(text)
+end
+
+function runtime:ReadSetNameInput()
+	return self:NormalizeSavedSetName(self.setNameText)
+end
+
+function runtime:ApplyTrackedSet(setName)
+	local setData = self.trackedItemSets[setName]
+	if type(setData) ~= "table" then
+		self:SetTrackerSetStatus("Set not found.", 1, 0.58, 0.45)
+		return
+	end
+	local displayName = self:GetTrackedSetDisplayName(setName)
+
+	local slotCount = math.floor(tonumber(setData.slotCount) or TRACKED_SLOT_COUNT)
+	if slotCount < 1 then
+		slotCount = 1
+	elseif slotCount > 20 then
+		slotCount = 20
+	end
+
+	if self.ChangeSlotCount ~= nil and slotCount ~= TRACKED_SLOT_COUNT then
+		self:ChangeSlotCount(slotCount - TRACKED_SLOT_COUNT)
+	end
+
+	for index = 1, 20 do
+		trackedItems[index] = nil
+	end
+
+	local items = setData.items or {}
+	for index = 1, slotCount do
+		local copied = self:CopyTrackedItem(items[index] or items[tostring(index)])
+		if copied ~= nil then
+			trackedItems[index] = copied
+		end
+	end
+
+	self.selectedSetName = setName
+	self:SyncSetNameInputText(displayName)
+	SaveTrackedItems()
+	MarkInventoryDirty()
+	if ApplyTrackerLayout ~= nil then
+		ApplyTrackerLayout()
+	end
+	UpdateRows()
+	self:UpdateTrackerSetList()
+	self:SetTrackerSetStatus("Swapped " .. displayName .. ".", 0.62, 1, 0.62)
+end
+
+function runtime:SaveNamedTrackedSet(overwrite)
+	local setName = self:ReadSetNameInput()
+	if setName == "" then
+		self:SetTrackerSetStatus("Enter a set name.", 1, 0.72, 0.42)
+		return
+	end
+
+	local existingSetName = self:FindTrackedSetKeyByName(setName)
+	if existingSetName ~= nil and overwrite ~= true then
+		self.selectedSetName = existingSetName
+		self:SyncSetNameInputText(self:GetTrackedSetDisplayName(existingSetName))
+		self:UpdateTrackerSetList()
+		self:SetTrackerSetStatus("Set exists. Use Overwrite.", 1, 0.72, 0.42)
+		return
+	end
+
+	local captured, itemCount = self:CaptureTrackedSet()
+	if itemCount == 0 then
+		self:SetTrackerSetStatus("No tracked items to save.", 1, 0.58, 0.45)
+		return
+	end
+
+	captured.name = setName
+	if existingSetName ~= nil and existingSetName ~= setName then
+		self.trackedItemSets[existingSetName] = nil
+	end
+	self.trackedItemSets[setName] = captured
+	self.selectedSetName = setName
+	if not self:SaveTrackedItemSets() then
+		self:SetTrackerSetStatus("Save failed.", 1, 0.58, 0.45)
+		return
+	end
+
+	self:UpdateTrackerSetList()
+	if self.RecreateSetNameInput ~= nil then
+		self:RecreateSetNameInput()
+	else
+		self:SyncSetNameInputText("")
+	end
+	self:SetTrackerSetStatus("Saved " .. setName .. " (" .. tostring(itemCount) .. " items).", 0.62, 1, 0.62)
+end
+
+function runtime:DeleteNamedTrackedSet(setName)
+	local name = Trim(setName or self:ReadSetNameInput())
+	local savedName = self:FindTrackedSetKeyByName(name)
+	if savedName == nil and name == "" then
+		savedName = self.selectedSetName
+	end
+	if savedName == nil or self.trackedItemSets[savedName] == nil then
+		self:SetTrackerSetStatus("Set not found.", 1, 0.58, 0.45)
+		return
+	end
+
+	local displayName = self:GetTrackedSetDisplayName(savedName)
+	self.trackedItemSets[savedName] = nil
+	if self.selectedSetName == savedName then
+		self.selectedSetName = nil
+	end
+	self:SaveTrackedItemSets()
+	self:SyncSetNameInputText("")
+	self:UpdateTrackerSetList()
+	self:SetTrackerSetStatus("Deleted " .. displayName .. ".", 0.95, 0.86, 0.6)
+end
+
+function runtime:CreateTrackerSetRow(index)
+	local row = self.setWindow:CreateChildWidget("button", "lootTrackerSetRow" .. tostring(index), 0, true)
+	row:SetText("")
+	row:SetStyle("text_default")
+	row:SetExtent(CONFIG.SET_WINDOW_CONTENT_WIDTH, CONFIG.SET_ROW_HEIGHT)
+	row.index = index
+
+	local rowBackground = row:CreateColorDrawable(0.08, 0.08, 0.09, 0.72, "background")
+	rowBackground:AddAnchor("TOPLEFT", row, 0, 0)
+	rowBackground:AddAnchor("BOTTOMRIGHT", row, 0, 0)
+	row.background = rowBackground
+
+	local nameLabel = row:CreateChildWidget("label", "lootTrackerSetRowName" .. tostring(index), 0, true)
+	nameLabel:SetText("")
+	nameLabel:SetExtent(CONFIG.SET_NAME_TEXT_MAX_WIDTH, 20)
+	nameLabel.style:SetAlign(ALIGN_LEFT)
+	nameLabel.style:SetFontSize(11)
+	nameLabel.style:SetColor(0.98, 0.98, 0.98, 1)
+	nameLabel.style:SetOutline(true)
+	nameLabel:AddAnchor("LEFT", row, 8, 0)
+	SafeMethod(nameLabel, "EnablePick", false)
+	row.nameLabel = nameLabel
+
+	local countLabel = row:CreateChildWidget("label", "lootTrackerSetRowCount" .. tostring(index), 0, true)
+	countLabel:SetText("")
+	countLabel:SetExtent(28, 20)
+	countLabel.style:SetAlign(ALIGN_RIGHT)
+	countLabel.style:SetFontSize(10)
+	countLabel.style:SetColor(0.92, 0.86, 0.62, 1)
+	countLabel.style:SetOutline(true)
+	countLabel:AddAnchor("RIGHT", row, -8, 0)
+	SafeMethod(countLabel, "EnablePick", false)
+	row.countLabel = countLabel
+
+	function row:OnClick()
+		if self.setName ~= nil then
+			runtime:ApplyTrackedSet(self.setName)
+		end
+	end
+	row:SetHandler("OnClick", row.OnClick)
+
+	row:Show(false)
+	self.trackerSetRows[index] = row
+	return row
+end
+
+function runtime:UpdateTrackerSetList()
+	if self.setWindow == nil then
+		return
+	end
+
+	local names = self:GetSortedTrackedSetNames()
+	self:UpdateTrackerSetWindowSize(#names)
+
+	for rowIndex, setName in ipairs(names) do
+		local row = self.trackerSetRows[rowIndex]
+		if row == nil then
+			row = self:CreateTrackerSetRow(rowIndex)
+		end
+
+		row.setName = setName
+		row:RemoveAllAnchors()
+		row:AddAnchor(
+			"TOPLEFT",
+			self.setWindow,
+			CONFIG.SET_WINDOW_PADDING,
+			CONFIG.SET_ROW_TOP + ((rowIndex - 1) * (CONFIG.SET_ROW_HEIGHT + CONFIG.SET_ROW_GAP))
+		)
+		row:SetExtent(CONFIG.SET_WINDOW_CONTENT_WIDTH, CONFIG.SET_ROW_HEIGHT)
+		row.nameLabel:SetText(self:GetTrackerSetNameDisplayText(setName))
+		row.countLabel:SetText(tostring(self:GetTrackedSetItemCount(self.trackedItemSets[setName])))
+		row:Show(true)
+
+		if self.selectedSetName == setName then
+			row.background:SetColor(0.92, 0.62, 0.18, 0.92)
+		else
+			row.background:SetColor(0.08, 0.08, 0.09, 0.72)
+		end
+	end
+
+	for rowIndex = #names + 1, #self.trackerSetRows do
+		local row = self.trackerSetRows[rowIndex]
+		if row ~= nil then
+			row.setName = nil
+			row:Show(false)
+		end
+	end
+end
+
+function runtime:CreateTrackerSetWindow()
+	if self.setWindow ~= nil then
+		return self.setWindow
+	end
+
+	_G.__LOOT_TRACKER_SET_NAME_INPUT_SERIAL = (_G.__LOOT_TRACKER_SET_NAME_INPUT_SERIAL or 0) + 1
+	local window = CreateEmptyWindow("lootTrackerSetWindow", "UIParent")
+	window:SetExtent(CONFIG.SET_WINDOW_WIDTH, CONFIG.SET_WINDOW_MIN_HEIGHT)
+	window:EnableDrag(true)
+	window:Clickable(true)
+	window:Show(false)
+	self.setWindow = window
+
+	local defaultX, defaultY = GetWidgetSavedPosition(trackerWindow)
+	if defaultX == nil then
+		defaultX = 600
+		defaultY = 320
+	else
+		defaultX = defaultX + GetTrackerWindowWidth() + 8
+	end
+	local savedX, savedY = LoadSavedPosition(CONFIG.SET_WINDOW_POSITION_KEY, defaultX, defaultY)
+	window:AddAnchor("TOPLEFT", "UIParent", savedX, savedY)
+
+	local background = window:CreateColorDrawable(0, 0, 0, 0.76, "background")
+	background:AddAnchor("TOPLEFT", window, 0, 0)
+	background:AddAnchor("BOTTOMRIGHT", window, 0, 0)
+
+	local title = window:CreateChildWidget("label", "lootTrackerSetTitle", 0, true)
+	title:SetText("Loot Sets")
+	title:SetExtent(CONFIG.SET_WINDOW_CONTENT_WIDTH - 28, 22)
+	title.style:SetAlign(ALIGN_LEFT)
+	title.style:SetFontSize(13)
+	title.style:SetColor(0.95, 0.92, 0.82, 1)
+	title.style:SetOutline(true)
+	title:AddAnchor("TOPLEFT", window, CONFIG.SET_WINDOW_PADDING, 8)
+	SafeMethod(title, "EnableDrag", true)
+
+	function title:OnDragStart()
+		window:StartMoving()
+	end
+	title:SetHandler("OnDragStart", title.OnDragStart)
+
+	function title:OnDragStop()
+		window:StopMovingOrSizing()
+		SaveWidgetPosition(window, CONFIG.SET_WINDOW_POSITION_KEY)
+	end
+	title:SetHandler("OnDragStop", title.OnDragStop)
+
+	local closeButton = window:CreateChildWidget("button", "lootTrackerSetCloseButton", 0, true)
+	closeButton:SetStyle("text_default")
+	closeButton:SetText("X")
+	closeButton:SetExtent(24, 22)
+	closeButton:AddAnchor("TOPRIGHT", window, -CONFIG.SET_WINDOW_PADDING, 6)
+
+	function closeButton:OnClick()
+		runtime:CloseTrackerSetWindow()
+	end
+	closeButton:SetHandler("OnClick", closeButton.OnClick)
+
+	local inputBackground = window:CreateColorDrawable(1, 1, 1, 0.18, "background")
+	inputBackground:AddAnchor("TOPLEFT", window, CONFIG.SET_WINDOW_PADDING, 36)
+	inputBackground:SetExtent(CONFIG.SET_WINDOW_CONTENT_WIDTH, 26)
+	window.nameInputBackground = inputBackground
+
+	local nameInput = window:CreateChildWidget(
+		"editbox",
+		"lootTrackerSetNameInput" .. tostring(_G.__LOOT_TRACKER_SET_NAME_INPUT_SERIAL),
+		0,
+		true
+	)
+	nameInput:AddAnchor("TOPLEFT", window, CONFIG.SET_WINDOW_PADDING + 5, 40)
+	nameInput:SetExtent(CONFIG.SET_WINDOW_CONTENT_WIDTH - 10, 18)
+	nameInput:SetText("")
+	SafeMethod(nameInput, "SetMaxTextLength", 32)
+	SafeMethod(nameInput, "SetEnglish", true)
+	SafeMethod(nameInput, "SetInset", 5, 0, 5, 0)
+	SafeMethod(nameInput, "Enable", true)
+	SafeMethod(nameInput, "Show", true)
+	SafeMethod(nameInput, "SetVisible", true)
+	SafeMethod(nameInput, "Clickable", true)
+	SafeMethod(nameInput, "EnableInput", true)
+	SafeMethod(nameInput, "SetInputEnabled", true)
+	SafeMethod(nameInput, "EnableHitTest", true)
+	SafeMethod(nameInput, "SetHitTestEnabled", true)
+	if nameInput.style ~= nil then
+		nameInput.style:SetAlign(ALIGN_LEFT)
+		nameInput.style:SetFontSize(13)
+		nameInput.style:SetColor(0.05, 0.06, 0.05, 1)
+	end
+	self.setNameInput = nameInput
+
+	local function ActivateNameInput()
+		runtime:SyncSetNameInputText("")
+		runtime.setNameInputAcceptingKeys = true
+		runtime:ResetSetNameInputPending()
+		if window.nameInputBackground ~= nil then
+			window.nameInputBackground:SetColor(0.95, 0.74, 0.32, 0.46)
+		end
+		SafeMethod(nameInput, "SetFocus")
+		SafeMethod(nameInput, "SetFocus", true)
+	end
+
+	local function NormalizeSetNameInputCompare(value)
+		local text = string.lower(tostring(value or ""))
+		if text == "space" then
+			return " "
+		end
+		return text
+	end
+
+	local function NormalizeSetNameInputCharacter(value)
+		local text = tostring(value or "")
+		if text == "space" or text == "Space" or text == "SPACE" then
+			return " "
+		end
+		return ApplySetNameShiftToCharacter(text)
+	end
+
+	local function OnSetNameChar(...)
+		if runtime.setNameInputAcceptingKeys ~= true then
+			return
+		end
+
+		local text = NormalizeSetNameInputCharacter(FirstPrintableStringArg(...))
+		if text == "" then
+			return
+		end
+
+		local normalizedText = NormalizeSetNameInputCompare(text)
+		runtime.setNameCharHandlerActive = true
+		if
+			runtime.setNameLastCharText == normalizedText
+			and runtime.setNameLastCharElapsed <= CONFIG.SET_NAME_DUPLICATE_KEY_SUPPRESS_SECONDS
+		then
+			runtime.setNameLastCharElapsed = CONFIG.SET_NAME_DUPLICATE_KEY_SUPPRESS_SECONDS + 1
+			return
+		end
+
+		if
+			runtime.setNameLastKeyText == normalizedText
+			and runtime.setNameLastKeyElapsed <= CONFIG.SET_NAME_CHAR_KEY_SUPPRESS_SECONDS
+			and string.len(runtime.setNameText) > 0
+		then
+			runtime:ReplaceLastSetNameInputText(text)
+		else
+			runtime:AppendSetNameInputText(text)
+		end
+
+		runtime.setNameLastKeyText = nil
+		runtime.setNameLastKeyElapsed = 0
+		runtime.setNameLastCharText = normalizedText
+		runtime.setNameLastCharElapsed = 0
+		runtime.setNameIgnoreNextKeyText = normalizedText
+		runtime.setNameIgnoreNextKeyElapsed = 0
+	end
+
+	local function OnSetNameTextChanged()
+		if runtime.setNameInputAcceptingKeys ~= true or runtime.setNameInputSyncingText == true then
+			return
+		end
+		runtime:SyncSetNameInputWidgetText(runtime.setNameText, false)
+	end
+
+	local function OnSetNameKey(...)
+		if runtime.setNameInputAcceptingKeys ~= true then
+			return
+		end
+
+		local key = FirstSearchKeyArg(...)
+		if key == nil then
+			return
+		end
+		if IsShiftKey(key) then
+			runtime.setNameShiftDown = false
+			return
+		elseif IsBackspaceKey(key) or IsDeleteKey(key) then
+			if runtime.setNameEraseHandledOnKeyDown == true then
+				runtime.setNameEraseHandledOnKeyDown = false
+				return
+			end
+			runtime:ApplySetNameInputText(DropLastSearchCharacter(runtime.setNameText))
+			runtime:ResetSetNameInputPending()
+		elseif IsClearSearchKey(key) then
+			runtime:ApplySetNameInputText("")
+			runtime:ResetSetNameInputPending()
+		else
+			local character = ApplySetNameShiftToCharacter(SearchCharacterFromKey(key))
+			if character ~= nil then
+				local normalizedCharacter = NormalizeSetNameInputCompare(character)
+				if
+					runtime.setNameIgnoreNextKeyText == normalizedCharacter
+					and runtime.setNameIgnoreNextKeyElapsed <= CONFIG.SET_NAME_CHAR_KEY_SUPPRESS_SECONDS
+				then
+					if string.len(runtime.setNameText) > 0 and tostring(character) ~= normalizedCharacter then
+						runtime:ReplaceLastSetNameInputText(character)
+					end
+					runtime.setNameIgnoreNextKeyText = nil
+					runtime.setNameIgnoreNextKeyElapsed = 0
+					return
+				end
+				if
+					runtime.setNameLastKeyText == normalizedCharacter
+					and runtime.setNameLastKeyElapsed <= CONFIG.SET_NAME_DUPLICATE_KEY_SUPPRESS_SECONDS
+				then
+					runtime.setNameLastKeyElapsed = CONFIG.SET_NAME_DUPLICATE_KEY_SUPPRESS_SECONDS + 1
+					return
+				end
+				runtime:AppendSetNameInputText(character)
+				runtime.setNameLastKeyText = normalizedCharacter
+				runtime.setNameLastKeyElapsed = 0
+			end
+		end
+	end
+
+	local function OnSetNameKeyDown(...)
+		local key = FirstSearchKeyArg(...)
+		if IsShiftKey(key) then
+			runtime.setNameShiftDown = true
+		elseif runtime.setNameInputAcceptingKeys == true and (IsBackspaceKey(key) or IsDeleteKey(key)) then
+			runtime:ApplySetNameInputText(DropLastSearchCharacter(runtime.setNameText))
+			runtime:ResetSetNameInputPending()
+			runtime.setNameEraseHandledOnKeyDown = true
+		end
+	end
+
+	SafeMethod(nameInput, "SetHandler", "OnClick", ActivateNameInput)
+	SafeMethod(nameInput, "SetHandler", "OnMouseDown", ActivateNameInput)
+	SafeMethod(nameInput, "SetHandler", "OnMouseUp", ActivateNameInput)
+	SafeMethod(nameInput, "SetHandler", "OnLButtonDown", ActivateNameInput)
+	SafeMethod(nameInput, "SetHandler", "OnLButtonUp", ActivateNameInput)
+	SafeMethod(nameInput, "SetHandler", "OnLeftButtonDown", ActivateNameInput)
+	SafeMethod(nameInput, "SetHandler", "OnLeftButtonUp", ActivateNameInput)
+	SafeMethod(nameInput, "SetHandler", "OnDoubleClick", ActivateNameInput)
+	SafeMethod(nameInput, "SetHandler", "OnDoubleClicked", ActivateNameInput)
+	SafeMethod(nameInput, "SetHandler", "OnChar", OnSetNameChar)
+	SafeMethod(nameInput, "SetHandler", "OnTextInput", OnSetNameChar)
+	SafeMethod(nameInput, "SetHandler", "OnInput", OnSetNameChar)
+	SafeMethod(nameInput, "SetHandler", "OnTextChanged", OnSetNameTextChanged)
+	SafeMethod(nameInput, "SetHandler", "OnTextChange", OnSetNameTextChanged)
+	SafeMethod(nameInput, "SetHandler", "OnEditTextChanged", OnSetNameTextChanged)
+	SafeMethod(nameInput, "SetHandler", "OnChanged", OnSetNameTextChanged)
+	SafeMethod(nameInput, "SetHandler", "OnKeyDown", OnSetNameKeyDown)
+	SafeMethod(nameInput, "SetHandler", "OnRawKeyDown", OnSetNameKeyDown)
+	SafeMethod(nameInput, "SetHandler", "OnKeyUp", OnSetNameKey)
+	SafeMethod(nameInput, "SetHandler", "OnRawKeyUp", OnSetNameKey)
+
+	function runtime:ConfigureSetNameInput(input)
+		if input == nil then
+			return
+		end
+		input:AddAnchor("TOPLEFT", window, CONFIG.SET_WINDOW_PADDING + 5, 40)
+		input:SetExtent(CONFIG.SET_WINDOW_CONTENT_WIDTH - 10, 18)
+		input:SetText("")
+		SafeMethod(input, "SetMaxTextLength", 32)
+		SafeMethod(input, "SetEnglish", true)
+		SafeMethod(input, "SetInset", 5, 0, 5, 0)
+		SafeMethod(input, "Enable", true)
+		SafeMethod(input, "Show", true)
+		SafeMethod(input, "SetVisible", true)
+		SafeMethod(input, "Clickable", true)
+		SafeMethod(input, "EnableInput", true)
+		SafeMethod(input, "SetInputEnabled", true)
+		SafeMethod(input, "EnableHitTest", true)
+		SafeMethod(input, "SetHitTestEnabled", true)
+		if input.style ~= nil then
+			input.style:SetAlign(ALIGN_LEFT)
+			input.style:SetFontSize(13)
+			input.style:SetColor(0.05, 0.06, 0.05, 1)
+		end
+		SafeMethod(input, "SetHandler", "OnClick", ActivateNameInput)
+		SafeMethod(input, "SetHandler", "OnMouseDown", ActivateNameInput)
+		SafeMethod(input, "SetHandler", "OnMouseUp", ActivateNameInput)
+		SafeMethod(input, "SetHandler", "OnLButtonDown", ActivateNameInput)
+		SafeMethod(input, "SetHandler", "OnLButtonUp", ActivateNameInput)
+		SafeMethod(input, "SetHandler", "OnLeftButtonDown", ActivateNameInput)
+		SafeMethod(input, "SetHandler", "OnLeftButtonUp", ActivateNameInput)
+		SafeMethod(input, "SetHandler", "OnDoubleClick", ActivateNameInput)
+		SafeMethod(input, "SetHandler", "OnDoubleClicked", ActivateNameInput)
+		SafeMethod(input, "SetHandler", "OnChar", OnSetNameChar)
+		SafeMethod(input, "SetHandler", "OnTextInput", OnSetNameChar)
+		SafeMethod(input, "SetHandler", "OnInput", OnSetNameChar)
+		SafeMethod(input, "SetHandler", "OnTextChanged", OnSetNameTextChanged)
+		SafeMethod(input, "SetHandler", "OnTextChange", OnSetNameTextChanged)
+		SafeMethod(input, "SetHandler", "OnEditTextChanged", OnSetNameTextChanged)
+		SafeMethod(input, "SetHandler", "OnChanged", OnSetNameTextChanged)
+		SafeMethod(input, "SetHandler", "OnKeyDown", OnSetNameKeyDown)
+		SafeMethod(input, "SetHandler", "OnRawKeyDown", OnSetNameKeyDown)
+		SafeMethod(input, "SetHandler", "OnKeyUp", OnSetNameKey)
+		SafeMethod(input, "SetHandler", "OnRawKeyUp", OnSetNameKey)
+	end
+
+	function runtime:RecreateSetNameInput()
+		local oldInput = self.setNameInput
+		if oldInput ~= nil then
+			SafeMethod(oldInput, "ClearText")
+			SafeMethod(oldInput, "ClearInputText")
+			SafeMethod(oldInput, "ClearEditText")
+			SafeMethod(oldInput, "ClearFocus")
+			SafeMethod(oldInput, "SetFocus", false)
+			SafeMethod(oldInput, "Show", false)
+			SafeMethod(oldInput, "SetVisible", false)
+			SafeMethod(oldInput, "ReleaseHandler", "OnClick")
+			SafeMethod(oldInput, "ReleaseHandler", "OnMouseDown")
+			SafeMethod(oldInput, "ReleaseHandler", "OnMouseUp")
+			SafeMethod(oldInput, "ReleaseHandler", "OnLButtonDown")
+			SafeMethod(oldInput, "ReleaseHandler", "OnLButtonUp")
+			SafeMethod(oldInput, "ReleaseHandler", "OnLeftButtonDown")
+			SafeMethod(oldInput, "ReleaseHandler", "OnLeftButtonUp")
+			SafeMethod(oldInput, "ReleaseHandler", "OnDoubleClick")
+			SafeMethod(oldInput, "ReleaseHandler", "OnDoubleClicked")
+			SafeMethod(oldInput, "ReleaseHandler", "OnChar")
+			SafeMethod(oldInput, "ReleaseHandler", "OnTextInput")
+			SafeMethod(oldInput, "ReleaseHandler", "OnInput")
+			SafeMethod(oldInput, "ReleaseHandler", "OnTextChanged")
+			SafeMethod(oldInput, "ReleaseHandler", "OnTextChange")
+			SafeMethod(oldInput, "ReleaseHandler", "OnEditTextChanged")
+			SafeMethod(oldInput, "ReleaseHandler", "OnChanged")
+			SafeMethod(oldInput, "ReleaseHandler", "OnKeyDown")
+			SafeMethod(oldInput, "ReleaseHandler", "OnRawKeyDown")
+			SafeMethod(oldInput, "ReleaseHandler", "OnKeyUp")
+			SafeMethod(oldInput, "ReleaseHandler", "OnRawKeyUp")
+		end
+
+		_G.__LOOT_TRACKER_SET_NAME_INPUT_SERIAL = (_G.__LOOT_TRACKER_SET_NAME_INPUT_SERIAL or 0) + 1
+		nameInput = window:CreateChildWidget(
+			"editbox",
+			"lootTrackerSetNameInput" .. tostring(_G.__LOOT_TRACKER_SET_NAME_INPUT_SERIAL),
+			0,
+			true
+		)
+		self.setNameInput = nameInput
+		self:ConfigureSetNameInput(nameInput)
+		if window.nameInputBackground ~= nil then
+			window.nameInputBackground:SetColor(1, 1, 1, 0.18)
+		end
+		self:SyncSetNameInputText("")
+		return nameInput
+	end
+
+	local saveButton = window:CreateChildWidget("button", "lootTrackerSetSaveButton", 0, true)
+	saveButton:SetStyle("text_default")
+	saveButton:SetText("Save")
+	saveButton:SetExtent(CONFIG.SET_SAVE_BUTTON_WIDTH, CONFIG.SET_ACTION_BUTTON_HEIGHT)
+	saveButton:AddAnchor("TOPLEFT", window, CONFIG.SET_WINDOW_PADDING, 70)
+
+	function saveButton:OnClick()
+		runtime:SaveNamedTrackedSet(false)
+	end
+	saveButton:SetHandler("OnClick", saveButton.OnClick)
+
+	local overwriteButton = window:CreateChildWidget("button", "lootTrackerSetOverwriteButton", 0, true)
+	overwriteButton:SetStyle("text_default")
+	overwriteButton:SetText("Overwrite")
+	overwriteButton:SetExtent(CONFIG.SET_OVERWRITE_BUTTON_WIDTH, CONFIG.SET_ACTION_BUTTON_HEIGHT)
+	overwriteButton:AddAnchor("TOPLEFT", window, CONFIG.SET_WINDOW_PADDING + CONFIG.SET_SAVE_BUTTON_WIDTH + 6, 70)
+
+	function overwriteButton:OnClick()
+		runtime:SaveNamedTrackedSet(true)
+	end
+	overwriteButton:SetHandler("OnClick", overwriteButton.OnClick)
+
+	local deleteButton = window:CreateChildWidget("button", "lootTrackerSetDeleteButton", 0, true)
+	deleteButton:SetStyle("text_default")
+	deleteButton:SetText("Del")
+	deleteButton:SetExtent(CONFIG.SET_DELETE_BUTTON_WIDTH, CONFIG.SET_ACTION_BUTTON_HEIGHT)
+	deleteButton:AddAnchor(
+		"TOPLEFT",
+		window,
+		CONFIG.SET_WINDOW_PADDING + CONFIG.SET_SAVE_BUTTON_WIDTH + CONFIG.SET_OVERWRITE_BUTTON_WIDTH + 12,
+		70
+	)
+
+	function deleteButton:OnClick()
+		runtime:DeleteNamedTrackedSet()
+	end
+	deleteButton:SetHandler("OnClick", deleteButton.OnClick)
+
+	local statusLabel = window:CreateChildWidget("label", "lootTrackerSetStatus", 0, true)
+	statusLabel:SetText("")
+	statusLabel:SetExtent(CONFIG.SET_WINDOW_CONTENT_WIDTH, 20)
+	statusLabel.style:SetAlign(ALIGN_CENTER)
+	statusLabel.style:SetFontSize(10)
+	statusLabel.style:SetColor(0.9, 0.86, 0.66, 1)
+	statusLabel.style:SetOutline(true)
+	statusLabel:AddAnchor("TOP", window, 0, CONFIG.SET_WINDOW_MIN_HEIGHT + CONFIG.SET_STATUS_OUTSIDE_GAP)
+	statusLabel:Show(false)
+	window.statusLabel = statusLabel
+
+	function window:OnDragStart()
+		self:StartMoving()
+	end
+	window:SetHandler("OnDragStart", window.OnDragStart)
+
+	function window:OnDragStop()
+		self:StopMovingOrSizing()
+		SaveWidgetPosition(self, CONFIG.SET_WINDOW_POSITION_KEY)
+	end
+	window:SetHandler("OnDragStop", window.OnDragStop)
+
+	self:UpdateTrackerSetList()
+	return window
+end
+
+function runtime:OpenTrackerSetWindow()
+	if self.setWindow == nil then
+		self:CreateTrackerSetWindow()
+	end
+	self:UpdateTrackerSetList()
+	if self.selectedSetName ~= nil then
+		self:SyncSetNameInputText(self:GetTrackedSetDisplayName(self.selectedSetName))
+	end
+	self.setWindow:Show(true)
+end
+
+function runtime:CloseTrackerSetWindow()
+	if self.setWindow == nil then
+		return
+	end
+	SaveWidgetPosition(self.setWindow, CONFIG.SET_WINDOW_POSITION_KEY)
+	self.setWindow:Show(false)
+end
+
+function runtime:ToggleTrackerSetWindow()
+	if self.setWindow == nil then
+		self:CreateTrackerSetWindow()
+	end
+
+	local visible = false
+	if type(self.setWindow.IsVisible) == "function" then
+		local ok, isVisible = pcall(self.setWindow.IsVisible, self.setWindow)
+		visible = ok and isVisible == true
+	end
+	if visible then
+		self:CloseTrackerSetWindow()
+	else
+		self:OpenTrackerSetWindow()
+	end
+end
+
+runtime:LoadTrackedItemSets()
+runtime:CreateTrackerSetWindow()
 
 RecreatePickerSearchBox = function()
 	ClearPickerSearchState()
@@ -3001,6 +4081,19 @@ function trackerWindow:OnUpdate(dt)
 
 	local delta = NormalizeDt(dt)
 	inventoryFallbackRefreshElapsed = inventoryFallbackRefreshElapsed + delta
+	if runtime.setNameLastKeyText ~= nil then
+		runtime.setNameLastKeyElapsed = runtime.setNameLastKeyElapsed + delta
+	end
+	if runtime.setNameLastCharText ~= nil then
+		runtime.setNameLastCharElapsed = runtime.setNameLastCharElapsed + delta
+	end
+	if runtime.setNameIgnoreNextKeyText ~= nil then
+		runtime.setNameIgnoreNextKeyElapsed = runtime.setNameIgnoreNextKeyElapsed + delta
+		if runtime.setNameIgnoreNextKeyElapsed > CONFIG.SET_NAME_CHAR_KEY_SUPPRESS_SECONDS then
+			runtime.setNameIgnoreNextKeyText = nil
+			runtime.setNameIgnoreNextKeyElapsed = 0
+		end
+	end
 	if isPickerOpen and not IsPickerWindowVisible() then
 		ClosePicker()
 	end
