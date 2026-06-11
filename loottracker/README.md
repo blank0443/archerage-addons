@@ -4,10 +4,11 @@ A simple addon for keeping track of item quantity count in inventory for farming
 
 ### NOTE: Use command "/loottracker reset" to reposition the window if it unreachable/disappears. 
 
-![Loot Tracker UI](../img/loot_tracker/main_window.png)
+![Loot Tracker UI](https://raw.githubusercontent.com/blank0443/addon_assets/refs/heads/main/loot_tracker/main_window.png)
 
 
-![Search Window](../img/loot_tracker/search_box1.png)
+
+![Search Window](https://raw.githubusercontent.com/blank0443/addon_assets/main/loot_tracker/search_item.gif)
 
 
 
