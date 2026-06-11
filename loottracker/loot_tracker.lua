@@ -525,9 +525,14 @@ local function GetWidgetSavedPosition(widget)
 		return nil, nil
 	end
 
-	local offsetX, offsetY = widget:GetOffset()
-	local uiScale = UIParent:GetUIScale() or 1.0
-	return math.floor((offsetX * uiScale) + 0.5), math.floor((offsetY * uiScale) + 0.5)
+	local ok, offsetX, offsetY = pcall(function()
+		return widget:GetOffset()
+	end)
+	if not ok or offsetX == nil or offsetY == nil then
+		return nil, nil
+	end
+
+	return math.floor((offsetX or 0) + 0.5), math.floor((offsetY or 0) + 0.5)
 end
 
 local function SaveWidgetPosition(widget, key)
@@ -545,6 +550,7 @@ local function SaveWidgetPosition(widget, key)
 		ADDON:SaveData(key, {
 			x = x,
 			y = y,
+			version = 2,
 		})
 	end)
 end
