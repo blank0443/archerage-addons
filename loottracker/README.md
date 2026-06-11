@@ -4,7 +4,7 @@ A simple addon for keeping track of item quantity count in inventory for farming
 
 ### NOTE: Use command "/loottracker reset" to reposition the window if it unreachable/disappears. 
 
-![Loot Tracker UI](https://raw.githubusercontent.com/blank0443/addon_assets/refs/heads/main/loot_tracker/main_window.png)
+![Loot Tracker UI](https://raw.githubusercontent.com/blank0443/addon_assets/main/loot_tracker/main_window.png)
 
 
 
@@ -24,3 +24,4 @@ Click on one of the slots to add/change an item to keep track of.
 - Easily clear tracked items (C Button)
 - Keep track of mobs killed (K).
 - Add/remove trackings slots via -,+ button.
+- Save tracking items into sets for different grinding. (S)
