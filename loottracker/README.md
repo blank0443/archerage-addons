@@ -6,9 +6,9 @@ A simple addon for keeping track of item quantity count in inventory for farming
 
 ![Loot Tracker UI](https://raw.githubusercontent.com/blank0443/addon_assets/main/loot_tracker/main_window.png)
 
-
-
 ![Search Window](https://raw.githubusercontent.com/blank0443/addon_assets/main/loot_tracker/search_item.gif)
+
+![Search Window](https://raw.githubusercontent.com/blank0443/addon_assets/main/loot_tracker/rotate_ui.gif)
 
 
 
