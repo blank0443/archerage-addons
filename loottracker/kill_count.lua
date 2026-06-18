@@ -9,14 +9,25 @@ ADDON:ImportObject(OBJECT_TYPE.WINDOW)
 ADDON:ImportObject(OBJECT_TYPE.LABEL)
 
 ADDON:ImportAPI(API_TYPE.UNIT.id)
+ADDON:ImportAPI(API_TYPE.PLAYER.id)
+ADDON:ImportAPI(API_TYPE.BAG.id)
 
 local SAVE_KEY = "lootKillCounterKills"
+local HISTORY_SAVE_KEY = "lootKillCounterHistory"
 local WINDOW_POSITION_KEY = "lootKillCounterWindowPosition"
 local WINDOW_SIZE_KEY = "lootKillCounterWindowSize"
+local VIEW_WINDOW_POSITION_KEY = "lootKillCounterViewWindowPosition"
 local WINDOW_WIDTH = 286
 local WINDOW_HEIGHT = 272
-local MIN_WINDOW_WIDTH = 230
+local MIN_WINDOW_WIDTH = 270
 local MIN_WINDOW_HEIGHT = 250
+local VIEW_WINDOW_WIDTH = 440
+local VIEW_WINDOW_HEIGHT = 560
+local VIEW_ROW_TOP = 76
+local VIEW_ROW_HEIGHT = 15
+local VIEW_CONTENT_ROW_COUNT = 31
+local BAG_KIND = 1
+local MAX_BAG_SLOTS = 150
 local PADDING = 10
 local ROW_TOP = 48
 local ROW_HEIGHT = 20
@@ -31,6 +42,10 @@ local MIN_WINDOW_SCALE = 0.85
 local MAX_WINDOW_SCALE = 1.35
 local DAMAGE_RECENT_SECONDS = 20
 local TARGET_CACHE_SECONDS = 12
+local LOOT_ATTRIBUTION_SECONDS = 20
+local EXP_ATTRIBUTION_SECONDS = 8
+local COMBAT_IDLE_TIMEOUT = 6
+local PLAYER_COMBAT_EXIT_GRACE = 1.5
 local PENDING_CAPTURE_DEDUPE_SECONDS = 0.35
 local MAX_PENDING_HITS_PER_TARGET = 4
 local MAX_PENDING_HITS_TOTAL = 20
@@ -54,6 +69,9 @@ if previousRuntime ~= nil then
 	if previousRuntime.counterWindow ~= nil then
 		previousRuntime.counterWindow:Show(false)
 	end
+	if previousRuntime.viewWindow ~= nil then
+		previousRuntime.viewWindow:Show(false)
+	end
 	if previousRuntime.launchButton ~= nil then
 		previousRuntime.launchButton:Show(false)
 	end
@@ -74,6 +92,37 @@ local runtime = {
 	currentPage = 1,
 	killCounts = {},
 	killerCounts = {},
+	sessionKillCounts = {},
+	damageDealtByUnit = {},
+	damageTakenByUnit = {},
+	damageBySkill = {},
+	damageByCategory = {},
+	damageByElement = {},
+	healBySkill = {},
+	missesBySkill = {},
+	energizeBySkill = {},
+	damageTakenBySource = {},
+	healReceivedBySource = {},
+	damageByTarget = {},
+	playerCombatStats = {},
+	itemDropsByUnit = {},
+	expByUnit = {},
+	totalDamageDealt = 0,
+	totalDamageTaken = 0,
+	totalDroppedItems = 0,
+	totalExpGained = 0,
+	totalManaSpent = 0,
+	lastPlayerMana = nil,
+	lastExpSnapshot = nil,
+	localPlayerName = nil,
+	combatActive = false,
+	combatStart = nil,
+	lastCombatActivity = nil,
+	totalKillTime = 0,
+	lastDamage = nil,
+	lastDamageTaken = nil,
+	lastBagSnapshot = nil,
+	pendingBagSyncUntil = nil,
 	recentDamageByTarget = {},
 	targetSnapshotsByName = {},
 	pendingTargetHitsByKey = {},
@@ -86,9 +135,17 @@ local runtime = {
 	currentTargetDeathCounted = false,
 	lastKill = nil,
 	rows = {},
+	viewContentRows = {},
 	resizeHandles = {},
+	historySessions = {},
+	nextHistorySessionIndex = 1,
+	historyPage = 1,
+	gameLoadingStarted = false,
+	viewMode = "current",
 }
 _G.__LOOT_KILL_COUNTER_RUNTIME = runtime
+local Analysis = _G.__LOOT_KILL_COUNTER_ANALYSIS or {}
+_G.__LOOT_KILL_COUNTER_ANALYSIS = Analysis
 
 local function Now()
 	if os ~= nil and type(os.clock) == "function" then
@@ -111,6 +168,13 @@ end
 local function SafeCall(target, methodName, ...)
 	if target == nil or type(target[methodName]) ~= "function" then
 		return false, nil
+	end
+	return pcall(target[methodName], target, ...)
+end
+
+local function SafeCallValues(target, methodName, ...)
+	if target == nil or type(target[methodName]) ~= "function" then
+		return false
 	end
 	return pcall(target[methodName], target, ...)
 end
@@ -174,6 +238,46 @@ local function SafeUnitValue(methodName, unit)
 		value = value.current or value.health or value.hp or value.value or value[1]
 	end
 	return tonumber(value)
+end
+
+local function GetLocalPlayerName()
+	if IsValidName(runtime.localPlayerName) then
+		return runtime.localPlayerName
+	end
+
+	local name = SafeUnitName("player")
+	if name ~= nil then
+		runtime.localPlayerName = name
+		return runtime.localPlayerName
+	end
+
+	local ok, worldName = SafeCall(X2Unit, "UnitNameWithWorld", "player")
+	if ok and IsValidName(worldName) then
+		runtime.localPlayerName = Trim(worldName)
+		return runtime.localPlayerName
+	end
+
+	return nil
+end
+
+local function StripWorldSuffix(name)
+	name = Trim(name or "")
+	local atPos = string.find(name, "@", 1, true)
+	if atPos ~= nil then
+		return Trim(string.sub(name, 1, atPos - 1))
+	end
+	return name
+end
+
+local function IsLocalPlayerName(value)
+	if not IsValidName(value) then
+		return false
+	end
+	value = StripWorldSuffix(value)
+	if NormalizeName(value) == "you" then
+		return true
+	end
+	return NamesMatch(value, StripWorldSuffix(GetLocalPlayerName()))
 end
 
 local function SaveData(key, value)
@@ -328,6 +432,65 @@ local function SaveKillCounts()
 	})
 end
 
+local function LoadSessionHistory()
+	local data = LoadData(HISTORY_SAVE_KEY)
+	if type(data) ~= "table" then
+		return
+	end
+
+	local sessions = data.sessions or data
+	local maxIndex = 0
+	if type(sessions) == "table" then
+		for _, session in ipairs(sessions) do
+			if type(session) == "table" then
+				local name = Trim(session.name or "")
+				if name == "" then
+					name = "S" .. tostring(#runtime.historySessions + 1)
+				end
+				local sessionIndex = tonumber(string.match(name, "^S(%d+)$"))
+				if sessionIndex ~= nil and sessionIndex > maxIndex then
+					maxIndex = sessionIndex
+				end
+
+				local normalizedLines = {}
+				if type(session.lines) == "table" then
+					for _, line in ipairs(session.lines) do
+						if type(line) == "table" then
+							normalizedLines[#normalizedLines + 1] = {
+								kind = tostring(line.kind or "metric"),
+								text = tostring(line.text or ""),
+							}
+						end
+					end
+				end
+
+				runtime.historySessions[#runtime.historySessions + 1] = {
+					name = name,
+					summary = tostring(session.summary or ""),
+					createdAt = tonumber(session.createdAt) or 0,
+					lines = normalizedLines,
+				}
+			end
+		end
+	end
+
+	local nextIndex = tonumber(data.nextIndex)
+	if nextIndex == nil or nextIndex <= maxIndex then
+		nextIndex = maxIndex + 1
+	end
+	if nextIndex < 1 then
+		nextIndex = #runtime.historySessions + 1
+	end
+	runtime.nextHistorySessionIndex = nextIndex
+end
+
+local function SaveSessionHistory()
+	SaveData(HISTORY_SAVE_KEY, {
+		nextIndex = runtime.nextHistorySessionIndex,
+		sessions = runtime.historySessions,
+	})
+end
+
 local function GetTotalKillCount()
 	local total = 0
 	for _, count in pairs(runtime.killCounts) do
@@ -376,7 +539,977 @@ local function ClampCurrentPage(totalRows)
 end
 
 local UpdateCounterWindow
+local UpdateViewWindow
 local RemovePendingTargetHitsByKey
+local RefreshViewWindowIfVisible
+local SaveCurrentSessionToHistory
+
+local function ClearSessionHistory()
+	runtime.historySessions = {}
+	runtime.nextHistorySessionIndex = 1
+	runtime.historyPage = 1
+	SaveSessionHistory()
+	if UpdateViewWindow ~= nil and runtime.viewMode == "history" then
+		UpdateViewWindow()
+	end
+end
+
+function Analysis.FormatAmount(value)
+	value = math.floor((tonumber(value) or 0) + 0.5)
+	return tostring(value)
+end
+
+function Analysis.FormatDuration(seconds)
+	seconds = math.floor((tonumber(seconds) or 0) + 0.5)
+	if seconds < 60 then
+		return tostring(seconds) .. "s"
+	end
+	local minutes = math.floor(seconds / 60)
+	local remainder = seconds - (minutes * 60)
+	if minutes < 60 then
+		return tostring(minutes) .. "m " .. tostring(remainder) .. "s"
+	end
+	local hours = math.floor(minutes / 60)
+	minutes = minutes - (hours * 60)
+	return tostring(hours) .. "h " .. tostring(minutes) .. "m"
+end
+
+function Analysis.TruncateText(value, maxLength)
+	local text = tostring(value or "")
+	maxLength = tonumber(maxLength) or 0
+	if maxLength <= 0 or string.len(text) <= maxLength then
+		return text
+	end
+	if maxLength <= 3 then
+		return string.sub(text, 1, maxLength)
+	end
+	return string.sub(text, 1, maxLength - 3) .. "..."
+end
+
+function Analysis.AddAmount(target, key, amount)
+	if key == nil or key == "" then
+		key = "Unknown"
+	end
+	amount = tonumber(amount) or 0
+	if amount <= 0 then
+		return
+	end
+	target[key] = (tonumber(target[key]) or 0) + amount
+end
+
+function Analysis.NormalizePositiveAmount(value)
+	local amount = tonumber(value)
+	if amount == nil then
+		return nil
+	end
+	amount = math.abs(amount)
+	if amount <= 0 then
+		return nil
+	end
+	return amount
+end
+
+Analysis.DAMAGE_CATEGORY_ORDER = { "Melee", "Spell", "Ranged", "Environmental", "Other" }
+
+function Analysis.FormatDamage(value)
+	local amount = math.floor(tonumber(value) or 0)
+	if amount >= 1000000 then
+		return string.format("%.1fM", amount / 1000000)
+	end
+	if amount >= 1000 then
+		return string.format("%.1fK", amount / 1000)
+	end
+	return tostring(amount)
+end
+
+function Analysis.FormatDps(value)
+	local dps = tonumber(value) or 0
+	if dps <= 0 then
+		return "0"
+	end
+	if dps >= 1000000 then
+		return string.format("%.1fM", dps / 1000000)
+	end
+	if dps >= 1000 then
+		return string.format("%.1fK", dps / 1000)
+	end
+	if dps >= 100 then
+		return tostring(math.floor(dps + 0.5))
+	end
+	return string.format("%.1f", dps)
+end
+
+function Analysis.FormatPercent(part, total)
+	part = tonumber(part) or 0
+	total = tonumber(total) or 0
+	if total <= 0 or part <= 0 then
+		return "0%"
+	end
+	return string.format("%.1f%%", (part / total) * 100)
+end
+
+function Analysis.GetCombatEventKind(eventType)
+	eventType = tostring(eventType or "")
+	if string.find(eventType, "MISSED", 1, true) ~= nil or string.find(eventType, "MISS", 1, true) ~= nil then
+		return "miss"
+	end
+	if string.find(eventType, "HEALED", 1, true) ~= nil then
+		return "heal"
+	end
+	if string.find(eventType, "ENERGIZE", 1, true) ~= nil then
+		return "energize"
+	end
+	if string.find(eventType, "DAMAGE", 1, true) ~= nil then
+		return "damage"
+	end
+	return "other"
+end
+
+function Analysis.GetDamageCategory(eventType)
+	eventType = tostring(eventType or "")
+	if string.find(eventType, "ENVIRONMENTAL", 1, true) ~= nil then
+		return "Environmental"
+	end
+	if string.find(eventType, "MELEE_DAMAGE", 1, true) ~= nil then
+		return "Melee"
+	end
+	if string.find(eventType, "SPELL_DAMAGE", 1, true) ~= nil then
+		return "Spell"
+	end
+	if string.find(eventType, "RANGE", 1, true) ~= nil then
+		return "Ranged"
+	end
+	if string.find(eventType, "DAMAGE", 1, true) ~= nil then
+		return "Other"
+	end
+	return "Other"
+end
+
+function Analysis.ParseCombatMessage(...)
+	return {
+		unitId = select(1, ...),
+		eventType = tostring(select(2, ...) or ""),
+		sourceName = Trim(select(3, ...) or ""),
+		targetName = Trim(select(4, ...) or ""),
+		abilityId = select(5, ...),
+		abilityName = Trim(select(6, ...) or ""),
+		damageType = select(7, ...),
+		effectType = select(8, ...),
+		isActive = select(9, ...),
+		arg10 = select(10, ...),
+		arg11 = select(11, ...),
+		arg12 = select(12, ...),
+		arg13 = select(13, ...),
+	}
+end
+
+function Analysis.NormalizeAbilityName(abilityName, eventType, abilityId)
+	abilityName = Trim(abilityName or "")
+	if abilityName == "HEALTH" then
+		return "Melee"
+	end
+	if abilityName ~= "" then
+		return abilityName
+	end
+	if string.find(tostring(eventType or ""), "MELEE", 1, true) ~= nil then
+		return "Melee Attack"
+	end
+	local numericAbilityId = tonumber(abilityId)
+	if numericAbilityId ~= nil then
+		return "Spell_" .. tostring(numericAbilityId)
+	end
+	return "Unknown"
+end
+
+function Analysis.BuildAbilityStorageKey(prefix, eventType, abilityId, abilityName)
+	return tostring(prefix or "Other") .. "::" .. Analysis.NormalizeAbilityName(abilityName, eventType, abilityId)
+end
+
+function Analysis.BuildSkillStorageKey(category, eventType, abilityId, abilityName)
+	return tostring(category or "Other") .. "::" .. Analysis.NormalizeAbilityName(abilityName, eventType, abilityId)
+end
+
+function Analysis.GetEffectAmount(eventKind, eventType, abilityId, effectType)
+	if eventKind ~= "damage" and eventKind ~= "heal" and eventKind ~= "energize" then
+		return nil
+	end
+	if eventKind == "damage"
+		and type(eventType) == "string"
+		and string.find(eventType, "MELEE_DAMAGE", 1, true) ~= nil
+	then
+		local amount = Analysis.NormalizePositiveAmount(abilityId)
+		if amount ~= nil then
+			return math.floor(amount)
+		end
+	end
+	local amount = Analysis.NormalizePositiveAmount(effectType) or Analysis.NormalizePositiveAmount(abilityId)
+	if amount == nil then
+		return nil
+	end
+	return math.floor(amount)
+end
+
+function Analysis.EnsurePlayerCombatStats()
+	if type(runtime.playerCombatStats) ~= "table" then
+		runtime.playerCombatStats = {}
+	end
+	return runtime.playerCombatStats
+end
+
+function Analysis.IncrementPlayerStat(field, amount)
+	local stats = Analysis.EnsurePlayerCombatStats()
+	amount = tonumber(amount) or 1
+	stats[field] = (tonumber(stats[field]) or 0) + amount
+end
+
+function Analysis.UpdateExtremeStat(field, value)
+	local stats = Analysis.EnsurePlayerCombatStats()
+	value = tonumber(value) or 0
+	if value <= 0 then
+		return
+	end
+	local current = tonumber(stats[field]) or 0
+	if value > current then
+		stats[field] = value
+	end
+end
+
+function Analysis.TrackDamageElement(damageType, amount)
+	local elementKey = Trim(tostring(damageType or ""))
+	if elementKey == "" or elementKey == "0" then
+		return
+	end
+	runtime.damageByElement[elementKey] = (tonumber(runtime.damageByElement[elementKey]) or 0) + amount
+end
+
+function Analysis.RecordSkillDamage(sourceName, targetName, eventType, abilityId, abilityName, damageAmount, damageType)
+	if not IsLocalPlayerName(sourceName) or not IsValidName(targetName) then
+		return
+	end
+	local category = Analysis.GetDamageCategory(eventType)
+	local skillKey = Analysis.BuildSkillStorageKey(category, eventType, abilityId, abilityName)
+	local displayName = Analysis.NormalizeAbilityName(abilityName, eventType, abilityId)
+	local entry = runtime.damageBySkill[skillKey]
+	if entry == nil then
+		entry = {
+			name = displayName,
+			category = category,
+			damage = 0,
+			hits = 0,
+		}
+		runtime.damageBySkill[skillKey] = entry
+	elseif entry.name == nil or Trim(entry.name) == "" then
+		entry.name = displayName
+	end
+	entry.category = category
+	if damageType ~= nil then
+		local damageTypeText = Trim(tostring(damageType))
+		if damageTypeText ~= "" and damageTypeText ~= "0" then
+			entry.damageType = damageTypeText
+		end
+	end
+	entry.damage = (tonumber(entry.damage) or 0) + damageAmount
+	entry.hits = (tonumber(entry.hits) or 0) + 1
+	Analysis.TrackDamageElement(damageType, damageAmount)
+	Analysis.IncrementPlayerStat("totalHits", 1)
+	Analysis.UpdateExtremeStat("largestHit", damageAmount)
+	runtime.damageByCategory[category] = (tonumber(runtime.damageByCategory[category]) or 0) + damageAmount
+	runtime.damageByTarget[Trim(targetName)] = (tonumber(runtime.damageByTarget[Trim(targetName)]) or 0) + damageAmount
+end
+
+function Analysis.RecordHeal(sourceName, eventType, abilityId, abilityName, healAmount)
+	if not IsLocalPlayerName(sourceName) then
+		return
+	end
+	local skillKey = Analysis.BuildAbilityStorageKey("Heal", eventType, abilityId, abilityName)
+	local entry = runtime.healBySkill[skillKey]
+	if entry == nil then
+		entry = {
+			name = Analysis.NormalizeAbilityName(abilityName, eventType, abilityId),
+			amount = 0,
+			hits = 0,
+		}
+		runtime.healBySkill[skillKey] = entry
+	end
+	entry.amount = (tonumber(entry.amount) or 0) + healAmount
+	entry.hits = (tonumber(entry.hits) or 0) + 1
+	Analysis.IncrementPlayerStat("totalHealingHits", 1)
+	Analysis.UpdateExtremeStat("largestHeal", healAmount)
+end
+
+function Analysis.RecordMiss(sourceName, eventType, abilityId, abilityName)
+	if not IsLocalPlayerName(sourceName) then
+		return
+	end
+	local category = "Spell"
+	if string.find(tostring(eventType or ""), "MELEE", 1, true) ~= nil
+		or string.find(tostring(eventType or ""), "SWING", 1, true) ~= nil
+	then
+		category = "Melee"
+	end
+	local skillKey = Analysis.BuildSkillStorageKey(category, eventType, abilityId, abilityName)
+	local entry = runtime.missesBySkill[skillKey]
+	if entry == nil then
+		entry = {
+			name = Analysis.NormalizeAbilityName(abilityName, eventType, abilityId),
+			category = category,
+			count = 0,
+		}
+		runtime.missesBySkill[skillKey] = entry
+	end
+	entry.count = (tonumber(entry.count) or 0) + 1
+	Analysis.IncrementPlayerStat("totalMisses", 1)
+	if category == "Melee" then
+		Analysis.IncrementPlayerStat("meleeMisses", 1)
+	else
+		Analysis.IncrementPlayerStat("spellMisses", 1)
+	end
+end
+
+function Analysis.RecordEnergize(sourceName, eventType, abilityId, abilityName, amount)
+	if not IsLocalPlayerName(sourceName) then
+		return
+	end
+	local skillKey = Analysis.BuildAbilityStorageKey("Energize", eventType, abilityId, abilityName)
+	local entry = runtime.energizeBySkill[skillKey]
+	if entry == nil then
+		entry = {
+			name = Analysis.NormalizeAbilityName(abilityName, eventType, abilityId),
+			amount = 0,
+			hits = 0,
+		}
+		runtime.energizeBySkill[skillKey] = entry
+	end
+	entry.amount = (tonumber(entry.amount) or 0) + amount
+	entry.hits = (tonumber(entry.hits) or 0) + 1
+end
+
+function Analysis.RecordDamageTaken(sourceName, damageAmount)
+	sourceName = Trim(sourceName or "Unknown")
+	if sourceName == "" then
+		sourceName = "Unknown"
+	end
+	runtime.damageTakenBySource[sourceName] =
+		(tonumber(runtime.damageTakenBySource[sourceName]) or 0) + damageAmount
+	runtime.lastDamageTaken = {
+		sourceName = sourceName,
+		time = RefreshClock(),
+	}
+	Analysis.IncrementPlayerStat("totalDamageTaken", damageAmount)
+end
+
+function Analysis.RecordHealReceived(sourceName, healAmount)
+	sourceName = Trim(sourceName or "Unknown")
+	if sourceName == "" then
+		sourceName = "Unknown"
+	end
+	runtime.healReceivedBySource[sourceName] =
+		(tonumber(runtime.healReceivedBySource[sourceName]) or 0) + healAmount
+	Analysis.IncrementPlayerStat("totalHealingReceived", healAmount)
+end
+
+function Analysis.RecordDpsReviewCombatMessage(msg)
+	if type(msg) ~= "table" or msg.sourceName == "" or msg.targetName == "" then
+		return false
+	end
+	local eventKind = Analysis.GetCombatEventKind(msg.eventType)
+	local amount = Analysis.GetEffectAmount(eventKind, msg.eventType, msg.abilityId, msg.effectType)
+	local recorded = false
+	if eventKind == "damage" and amount ~= nil then
+		if IsLocalPlayerName(msg.sourceName) then
+			Analysis.RecordSkillDamage(
+				msg.sourceName,
+				msg.targetName,
+				msg.eventType,
+				msg.abilityId,
+				msg.abilityName,
+				amount,
+				msg.damageType
+			)
+			recorded = true
+		end
+		if IsLocalPlayerName(msg.targetName) and not IsLocalPlayerName(msg.sourceName) then
+			Analysis.RecordDamageTaken(msg.sourceName, amount)
+			recorded = true
+		end
+	elseif eventKind == "heal" and amount ~= nil then
+		if IsLocalPlayerName(msg.sourceName) then
+			Analysis.RecordHeal(msg.sourceName, msg.eventType, msg.abilityId, msg.abilityName, amount)
+			recorded = true
+		end
+		if IsLocalPlayerName(msg.targetName) and not IsLocalPlayerName(msg.sourceName) then
+			Analysis.RecordHealReceived(msg.sourceName, amount)
+			recorded = true
+		end
+	elseif eventKind == "miss" then
+		Analysis.RecordMiss(msg.sourceName, msg.eventType, msg.abilityId, msg.abilityName)
+		recorded = IsLocalPlayerName(msg.sourceName)
+	elseif eventKind == "energize" and amount ~= nil then
+		Analysis.RecordEnergize(msg.sourceName, msg.eventType, msg.abilityId, msg.abilityName, amount)
+		recorded = IsLocalPlayerName(msg.sourceName)
+	end
+	if recorded then
+		Analysis.TouchKillCombatActivity()
+	end
+	if recorded and RefreshViewWindowIfVisible ~= nil then
+		RefreshViewWindowIfVisible()
+	end
+	return recorded
+end
+
+function Analysis.IsPlayerInCombat()
+	local ok, value = SafeCall(X2Player, "PlayerInCombat")
+	if ok and value == true then
+		return true
+	end
+	ok, value = SafeCall(X2Unit, "UnitCombatState", "player")
+	return ok and value == true
+end
+
+function Analysis.GetKillCombatDuration(now)
+	local total = tonumber(runtime.totalKillTime) or 0
+	if runtime.combatActive and runtime.combatStart ~= nil then
+		total = total + ((now or RefreshClock()) - runtime.combatStart)
+	end
+	if total < 0 then
+		return 0
+	end
+	return total
+end
+
+function Analysis.BeginKillCombatSession(now)
+	now = now or RefreshClock()
+	runtime.combatActive = true
+	runtime.combatStart = now
+	runtime.lastCombatActivity = now
+end
+
+function Analysis.EndKillCombatSession(now)
+	if not runtime.combatActive then
+		return
+	end
+	now = now or RefreshClock()
+	if runtime.combatStart ~= nil and now > runtime.combatStart then
+		runtime.totalKillTime = (tonumber(runtime.totalKillTime) or 0) + (now - runtime.combatStart)
+	end
+	runtime.combatActive = false
+	runtime.combatStart = nil
+	runtime.lastCombatActivity = nil
+	if RefreshViewWindowIfVisible ~= nil then
+		RefreshViewWindowIfVisible()
+	end
+end
+
+function Analysis.TouchKillCombatActivity(now)
+	now = now or RefreshClock()
+	if not runtime.combatActive then
+		Analysis.BeginKillCombatSession(now)
+		return
+	end
+	runtime.lastCombatActivity = now
+end
+
+function Analysis.EvaluateKillCombatEnd(now)
+	if not runtime.combatActive then
+		return
+	end
+	now = now or RefreshClock()
+	local lastActivity = tonumber(runtime.lastCombatActivity)
+	if lastActivity == nil then
+		Analysis.EndKillCombatSession(now)
+		return
+	end
+	local idle = now - lastActivity
+	if idle >= COMBAT_IDLE_TIMEOUT then
+		Analysis.EndKillCombatSession(now)
+		return
+	end
+	if not Analysis.IsPlayerInCombat() and idle >= PLAYER_COMBAT_EXIT_GRACE then
+		Analysis.EndKillCombatSession(now)
+	end
+end
+
+function Analysis.GetRecentMobName(maxAge)
+	-- Loot and EXP events do not expose a stable killed-unit id, so this report attributes them to the recent kill/current target.
+	local now = RefreshClock()
+	maxAge = tonumber(maxAge) or LOOT_ATTRIBUTION_SECONDS
+	if runtime.lastKill ~= nil
+		and IsValidName(runtime.lastKill.mobName)
+		and tonumber(runtime.lastKill.time) ~= nil
+		and now - runtime.lastKill.time <= maxAge
+	then
+		return runtime.lastKill.mobName
+	end
+	if IsValidName(runtime.currentTargetName) then
+		return Trim(runtime.currentTargetName)
+	end
+	return "Unknown"
+end
+
+function Analysis.RecordDroppedItem(mobName, itemName, count)
+	if not IsValidName(itemName) then
+		return
+	end
+	if not IsValidName(mobName) then
+		mobName = "Unknown"
+	else
+		mobName = Trim(mobName)
+	end
+	itemName = Trim(itemName)
+	count = math.floor((tonumber(count) or 1) + 0.5)
+	if count < 1 then
+		count = 1
+	end
+	if runtime.itemDropsByUnit[mobName] == nil then
+		runtime.itemDropsByUnit[mobName] = {}
+	end
+	runtime.itemDropsByUnit[mobName][itemName] =
+		(tonumber(runtime.itemDropsByUnit[mobName][itemName]) or 0) + count
+	runtime.totalDroppedItems = (tonumber(runtime.totalDroppedItems) or 0) + count
+	if RefreshViewWindowIfVisible ~= nil then
+		RefreshViewWindowIfVisible()
+	end
+end
+
+Analysis.LOOT_ITEM_TABLE_FIELDS = {
+	"item",
+	"itemInfo",
+	"item_info",
+	"lootItem",
+	"loot_item",
+	"itemData",
+	"item_data",
+	"info",
+}
+
+Analysis.LOOT_ITEM_NAME_FIELDS = {
+	"name",
+	"itemName",
+	"item_name",
+	"item_name_text",
+}
+
+Analysis.LOOT_ITEM_COUNT_FIELDS = {
+	"stackCount",
+	"stack_count",
+	"itemCount",
+	"item_count",
+	"quantity",
+	"amount",
+	"count",
+	"stack",
+}
+
+function Analysis.ExtractFieldString(source, fields)
+	for _, fieldName in ipairs(fields) do
+		local value = source[fieldName]
+		if type(value) == "string" and Trim(value) ~= "" then
+			return Trim(value)
+		end
+	end
+	return nil
+end
+
+function Analysis.ExtractFieldNumber(source, fields)
+	for _, fieldName in ipairs(fields) do
+		local value = tonumber(source[fieldName])
+		if value ~= nil and value >= 0 then
+			return value
+		end
+	end
+	return nil
+end
+
+function Analysis.ExtractLootItemFromTable(source, depth)
+	if type(source) ~= "table" or (tonumber(depth) or 0) > 3 then
+		return nil
+	end
+
+	local itemName = Analysis.ExtractFieldString(source, Analysis.LOOT_ITEM_NAME_FIELDS)
+	if itemName ~= nil then
+		return {
+			name = itemName,
+			count = Analysis.ExtractFieldNumber(source, Analysis.LOOT_ITEM_COUNT_FIELDS) or 1,
+		}
+	end
+
+	for _, fieldName in ipairs(Analysis.LOOT_ITEM_TABLE_FIELDS) do
+		local item = Analysis.ExtractLootItemFromTable(source[fieldName], (tonumber(depth) or 0) + 1)
+		if item ~= nil then
+			if item.count == nil then
+				item.count = Analysis.ExtractFieldNumber(source, Analysis.LOOT_ITEM_COUNT_FIELDS) or 1
+			end
+			return item
+		end
+	end
+
+	for _, value in pairs(source) do
+		if type(value) == "table" then
+			local item = Analysis.ExtractLootItemFromTable(value, (tonumber(depth) or 0) + 1)
+			if item ~= nil then
+				return item
+			end
+		end
+	end
+	return nil
+end
+
+function Analysis.ReadBagItem(posInBag)
+	local ok, item = SafeCall(X2Bag, "GetBagItemInfo", BAG_KIND, posInBag)
+	if ok then
+		return item
+	end
+	return nil
+end
+
+function Analysis.BuildBagSnapshot()
+	if X2Bag == nil or type(X2Bag.GetBagItemInfo) ~= "function" then
+		return nil
+	end
+
+	local snapshot = {}
+	for posInBag = 1, MAX_BAG_SLOTS do
+		local bagItem = Analysis.ReadBagItem(posInBag)
+		local item = Analysis.ExtractLootItemFromTable(bagItem, 0)
+		if item ~= nil and IsValidName(item.name) then
+			local count = math.floor((tonumber(item.count) or 1) + 0.5)
+			if count < 1 then
+				count = 1
+			end
+			local itemName = Trim(item.name)
+			snapshot[itemName] = (tonumber(snapshot[itemName]) or 0) + count
+		end
+	end
+	return snapshot
+end
+
+function Analysis.SyncBagDrops(baselineOnly)
+	local snapshot = Analysis.BuildBagSnapshot()
+	if snapshot == nil then
+		return false
+	end
+
+	local recorded = false
+	if not baselineOnly and runtime.lastBagSnapshot ~= nil then
+		local mobName = Analysis.GetRecentMobName(LOOT_ATTRIBUTION_SECONDS)
+		for itemName, count in pairs(snapshot) do
+			local previousCount = tonumber(runtime.lastBagSnapshot[itemName]) or 0
+			local gained = (tonumber(count) or 0) - previousCount
+			if gained > 0 then
+				Analysis.RecordDroppedItem(mobName, itemName, gained)
+				recorded = true
+			end
+		end
+	end
+
+	runtime.lastBagSnapshot = snapshot
+	return recorded
+end
+
+function Analysis.ScheduleBagDropSync()
+	runtime.pendingBagSyncUntil = RefreshClock() + 3
+	Analysis.SyncBagDrops(false)
+end
+
+function Analysis.RecordLootFromEventPayload(...)
+	local item = nil
+	local stringValues = {}
+	local countCandidate = nil
+	for index = 1, select("#", ...) do
+		local value = select(index, ...)
+		if type(value) == "table" and item == nil then
+			item = Analysis.ExtractLootItemFromTable(value, 0)
+		elseif type(value) == "string" and Trim(value) ~= "" then
+			stringValues[#stringValues + 1] = Trim(value)
+		elseif type(value) == "number" then
+			local numberValue = tonumber(value)
+			if countCandidate == nil and numberValue ~= nil and numberValue > 0 and numberValue <= 999 then
+				countCandidate = numberValue
+			end
+		end
+	end
+
+	if item == nil and #stringValues > 0 then
+		item = {
+			name = stringValues[#stringValues],
+			count = countCandidate or 1,
+		}
+	end
+	if item == nil or not IsValidName(item.name) then
+		return false
+	end
+	Analysis.RecordDroppedItem(Analysis.GetRecentMobName(LOOT_ATTRIBUTION_SECONDS), item.name, item.count)
+	return true
+end
+
+function Analysis.HandleLootAcquisitionEvent(...)
+	local recordedFromBag = Analysis.SyncBagDrops(false)
+	local recordedFromPayload = false
+	if not recordedFromBag then
+		recordedFromPayload = Analysis.RecordLootFromEventPayload(...)
+	end
+	if recordedFromBag or recordedFromPayload then
+		runtime.pendingBagSyncUntil = nil
+		Analysis.SyncBagDrops(true)
+	else
+		Analysis.ScheduleBagDropSync()
+	end
+end
+
+function Analysis.AttributeExpGain(amount)
+	amount = math.floor((tonumber(amount) or 0) + 0.5)
+	if amount <= 0 then
+		return false
+	end
+	runtime.totalExpGained = (tonumber(runtime.totalExpGained) or 0) + amount
+	Analysis.AddAmount(runtime.expByUnit, Analysis.GetRecentMobName(EXP_ATTRIBUTION_SECONDS), amount)
+	if RefreshViewWindowIfVisible ~= nil then
+		RefreshViewWindowIfVisible()
+	end
+	return true
+end
+
+Analysis.EXP_CURRENT_FIELDS = {
+	"current",
+	"cur",
+	"currentExp",
+	"curExp",
+	"exp",
+	"value",
+	"now",
+}
+
+Analysis.EXP_MAX_FIELDS = {
+	"max",
+	"maximum",
+	"maxExp",
+	"nextExp",
+	"requiredExp",
+	"requireExp",
+	"total",
+}
+
+Analysis.EXP_LEVEL_FIELDS = {
+	"level",
+	"lv",
+	"playerLevel",
+}
+
+function Analysis.BuildExpSnapshot(firstValue, secondValue, thirdValue)
+	local snapshot = {
+		current = nil,
+		max = nil,
+		level = nil,
+	}
+	if type(firstValue) == "table" then
+		snapshot.current = Analysis.ExtractFieldNumber(firstValue, Analysis.EXP_CURRENT_FIELDS) or tonumber(firstValue[1])
+		snapshot.max = Analysis.ExtractFieldNumber(firstValue, Analysis.EXP_MAX_FIELDS) or tonumber(firstValue[2])
+		snapshot.level = Analysis.ExtractFieldNumber(firstValue, Analysis.EXP_LEVEL_FIELDS) or tonumber(firstValue[3])
+	else
+		snapshot.current = tonumber(firstValue)
+		snapshot.max = tonumber(secondValue)
+		snapshot.level = tonumber(thirdValue)
+	end
+	if snapshot.current == nil then
+		return nil
+	end
+	return snapshot
+end
+
+function Analysis.ReadExpSnapshot()
+	local ok, firstValue, secondValue, thirdValue = SafeCallValues(X2Player, "GetExpInfo")
+	if not ok and _G ~= nil and type(_G.GetExpInfo) == "function" then
+		ok, firstValue, secondValue, thirdValue = pcall(_G.GetExpInfo)
+	end
+	if not ok then
+		return nil
+	end
+	return Analysis.BuildExpSnapshot(firstValue, secondValue, thirdValue)
+end
+
+function Analysis.SyncExpGained()
+	local snapshot = Analysis.ReadExpSnapshot()
+	if snapshot == nil then
+		return false
+	end
+
+	local last = runtime.lastExpSnapshot
+	local recorded = false
+	if last ~= nil and tonumber(last.current) ~= nil then
+		local gained = nil
+		if snapshot.level ~= nil and last.level ~= nil and snapshot.level > last.level then
+			gained = 0
+			if last.max ~= nil and last.max >= last.current then
+				gained = gained + (last.max - last.current)
+			end
+			gained = gained + snapshot.current
+		elseif snapshot.current >= last.current then
+			gained = snapshot.current - last.current
+		end
+		if gained ~= nil and gained > 0 then
+			recorded = Analysis.AttributeExpGain(gained) or recorded
+		end
+	end
+	runtime.lastExpSnapshot = snapshot
+	return recorded
+end
+
+Analysis.EXP_DELTA_FIELDS = {
+	"delta",
+	"diff",
+	"change",
+	"changedExp",
+	"changed_exp",
+	"expDelta",
+	"exp_delta",
+	"expDiff",
+	"exp_diff",
+	"gainExp",
+	"gain_exp",
+	"gainedExp",
+	"gained_exp",
+	"addExp",
+	"add_exp",
+	"addedExp",
+	"added_exp",
+	"amount",
+}
+
+function Analysis.ExtractExpDeltaFromTable(source, depth)
+	if type(source) ~= "table" or (tonumber(depth) or 0) > 3 then
+		return nil
+	end
+
+	local amount = Analysis.ExtractFieldNumber(source, Analysis.EXP_DELTA_FIELDS)
+	if amount ~= nil and amount > 0 then
+		return amount
+	end
+
+	for _, value in pairs(source) do
+		if type(value) == "table" then
+			amount = Analysis.ExtractExpDeltaFromTable(value, (tonumber(depth) or 0) + 1)
+			if amount ~= nil then
+				return amount
+			end
+		end
+	end
+	return nil
+end
+
+function Analysis.ExtractExpDeltaFromEvent(...)
+	local numbers = {}
+	for index = 1, select("#", ...) do
+		local value = select(index, ...)
+		if type(value) == "table" then
+			local amount = Analysis.ExtractExpDeltaFromTable(value, 0)
+			if amount ~= nil then
+				return amount
+			end
+		elseif type(value) == "number" then
+			numbers[#numbers + 1] = value
+		end
+	end
+
+	if #numbers == 1 and numbers[1] > 0 then
+		return numbers[1]
+	end
+	return nil
+end
+
+function Analysis.HandleExpChangedEvent(...)
+	if Analysis.SyncExpGained() then
+		return
+	end
+
+	local amount = Analysis.ExtractExpDeltaFromEvent(...)
+	if amount ~= nil then
+		Analysis.AttributeExpGain(amount)
+	end
+end
+
+function Analysis.SyncManaSpent()
+	local mana = SafeUnitValue("UnitMana", "player")
+	if mana == nil then
+		return
+	end
+	local lastMana = tonumber(runtime.lastPlayerMana)
+	if lastMana ~= nil and mana < lastMana then
+		runtime.totalManaSpent = (tonumber(runtime.totalManaSpent) or 0) + (lastMana - mana)
+		if RefreshViewWindowIfVisible ~= nil then
+			RefreshViewWindowIfVisible()
+		end
+	end
+	runtime.lastPlayerMana = mana
+end
+
+function Analysis.SyncSessionResourceSnapshots()
+	Analysis.SyncManaSpent()
+	Analysis.SyncExpGained()
+end
+
+function Analysis.RecordSessionDamage(sourceName, targetName, damageAmount)
+	damageAmount = Analysis.NormalizePositiveAmount(damageAmount)
+	if damageAmount == nil then
+		return
+	end
+
+	local sourceIsPlayer = IsLocalPlayerName(sourceName)
+	local targetIsPlayer = IsLocalPlayerName(targetName)
+	if sourceIsPlayer and not targetIsPlayer and IsValidName(targetName) then
+		targetName = Trim(targetName)
+		Analysis.AddAmount(runtime.damageDealtByUnit, targetName, damageAmount)
+		runtime.totalDamageDealt = (tonumber(runtime.totalDamageDealt) or 0) + damageAmount
+		Analysis.TouchKillCombatActivity()
+	end
+	if targetIsPlayer and not sourceIsPlayer and IsValidName(sourceName) then
+		sourceName = Trim(sourceName)
+		Analysis.AddAmount(runtime.damageTakenByUnit, sourceName, damageAmount)
+		runtime.totalDamageTaken = (tonumber(runtime.totalDamageTaken) or 0) + damageAmount
+		Analysis.TouchKillCombatActivity()
+	end
+	if RefreshViewWindowIfVisible ~= nil then
+		RefreshViewWindowIfVisible()
+	end
+end
+
+function Analysis.ClearSessionStats()
+	runtime.sessionKillCounts = {}
+	runtime.damageDealtByUnit = {}
+	runtime.damageTakenByUnit = {}
+	runtime.damageBySkill = {}
+	runtime.damageByCategory = {}
+	runtime.damageByElement = {}
+	runtime.healBySkill = {}
+	runtime.missesBySkill = {}
+	runtime.energizeBySkill = {}
+	runtime.damageTakenBySource = {}
+	runtime.healReceivedBySource = {}
+	runtime.damageByTarget = {}
+	runtime.playerCombatStats = {}
+	runtime.itemDropsByUnit = {}
+	runtime.expByUnit = {}
+	runtime.totalDamageDealt = 0
+	runtime.totalDamageTaken = 0
+	runtime.totalDroppedItems = 0
+	runtime.totalExpGained = 0
+	runtime.totalManaSpent = 0
+	runtime.totalKillTime = 0
+	runtime.combatActive = false
+	runtime.combatStart = nil
+	runtime.lastCombatActivity = nil
+	runtime.lastBagSnapshot = nil
+	runtime.pendingBagSyncUntil = nil
+	runtime.localPlayerName = nil
+	runtime.lastPlayerMana = nil
+	runtime.lastExpSnapshot = nil
+	runtime.lastDamage = nil
+	runtime.lastDamageTaken = nil
+	Analysis.SyncSessionResourceSnapshots()
+	Analysis.SyncBagDrops(true)
+	if RefreshViewWindowIfVisible ~= nil then
+		RefreshViewWindowIfVisible()
+	end
+end
 
 local function CountKill(mobName, killerName)
 	if not IsValidName(mobName) then
@@ -391,6 +1524,7 @@ local function CountKill(mobName, killerName)
 	end
 
 	runtime.killCounts[mobName] = (tonumber(runtime.killCounts[mobName]) or 0) + 1
+	runtime.sessionKillCounts[mobName] = (tonumber(runtime.sessionKillCounts[mobName]) or 0) + 1
 	if runtime.killerCounts[mobName] == nil then
 		runtime.killerCounts[mobName] = {}
 	end
@@ -399,11 +1533,15 @@ local function CountKill(mobName, killerName)
 		mobName = mobName,
 		killerName = killerName,
 		count = runtime.killCounts[mobName],
+		time = RefreshClock(),
 	}
 	SaveKillCounts()
 
 	if UpdateCounterWindow ~= nil then
 		UpdateCounterWindow()
+	end
+	if RefreshViewWindowIfVisible ~= nil then
+		RefreshViewWindowIfVisible()
 	end
 end
 
@@ -931,10 +2069,12 @@ end
 
 local function HandleCombatMessage(...)
 	local now = RefreshClock()
-	local eventType = select(2, ...)
-	local sourceName = Trim(select(3, ...))
-	local targetName = Trim(select(4, ...))
-	local damageAmount = GetCombatDamageAmount(eventType, select(5, ...), select(8, ...))
+	local msg = Analysis.ParseCombatMessage(...)
+	Analysis.RecordDpsReviewCombatMessage(msg)
+	local eventType = msg.eventType
+	local sourceName = msg.sourceName
+	local targetName = msg.targetName
+	local damageAmount = GetCombatDamageAmount(eventType, msg.abilityId, msg.effectType)
 	if sourceName == "" or targetName == "" then
 		return
 	end
@@ -942,6 +2082,7 @@ local function HandleCombatMessage(...)
 		return
 	end
 
+	Analysis.RecordSessionDamage(sourceName, targetName, damageAmount)
 	local targetKey = NormalizeTrimmedName(targetName)
 	runtime.recentDamageByTarget[targetKey] = {
 		sourceName = sourceName,
@@ -981,13 +2122,17 @@ local function ClearKillCounts()
 	runtime.pendingTargetHitsByKey = {}
 	runtime.currentTargetKey = nil
 	runtime.currentTargetDeathCounted = false
+	Analysis.ClearSessionStats()
 	SaveKillCounts()
 	if UpdateCounterWindow ~= nil then
 		UpdateCounterWindow()
 	end
 end
 
+LoadSessionHistory()
 LoadKillCounts()
+Analysis.SyncSessionResourceSnapshots()
+Analysis.SyncBagDrops(true)
 
 local windowX, windowY = LoadPosition(WINDOW_POSITION_KEY, 420, 318)
 local windowWidth, windowHeight = LoadWindowSize()
@@ -1019,6 +2164,12 @@ closeButton:SetText("X")
 closeButton:SetExtent(32, 20)
 closeButton:AddAnchor("TOPRIGHT", counterWindow, -PADDING, 9)
 
+local historyButton = counterWindow:CreateChildWidget("button", "lootKillCounterHistoryButton", 0, true)
+historyButton:SetStyle("text_default")
+historyButton:SetText("History")
+historyButton:SetExtent(64, 20)
+historyButton:AddAnchor("TOPRIGHT", counterWindow, -PADDING - 36, 9)
+
 local statusLabel = counterWindow:CreateChildWidget("label", "lootKillCounterStatus", 0, true)
 statusLabel:SetText("")
 statusLabel:SetExtent(WINDOW_WIDTH - (PADDING * 2), 20)
@@ -1043,24 +2194,30 @@ end
 local clearButton = counterWindow:CreateChildWidget("button", "lootKillCounterClearButton", 0, true)
 clearButton:SetStyle("text_default")
 clearButton:SetText("Clear")
-clearButton:SetExtent(70, 22)
+clearButton:SetExtent(48, 22)
 clearButton:AddAnchor("BOTTOMLEFT", counterWindow, PADDING, -PADDING)
+
+local viewButton = counterWindow:CreateChildWidget("button", "lootKillCounterViewButton", 0, true)
+viewButton:SetStyle("text_default")
+viewButton:SetText("View")
+viewButton:SetExtent(48, 22)
+viewButton:AddAnchor("BOTTOMLEFT", counterWindow, PADDING + 52, -PADDING)
 
 local prevButton = counterWindow:CreateChildWidget("button", "lootKillCounterPrevButton", 0, true)
 prevButton:SetStyle("text_default")
 prevButton:SetText("Prev")
-prevButton:SetExtent(56, 22)
+prevButton:SetExtent(48, 22)
 prevButton:AddAnchor("BOTTOMRIGHT", counterWindow, -122, -PADDING)
 
 local nextButton = counterWindow:CreateChildWidget("button", "lootKillCounterNextButton", 0, true)
 nextButton:SetStyle("text_default")
 nextButton:SetText("Next")
-nextButton:SetExtent(56, 22)
+nextButton:SetExtent(48, 22)
 nextButton:AddAnchor("BOTTOMRIGHT", counterWindow, -PADDING, -PADDING)
 
 local pageLabel = counterWindow:CreateChildWidget("label", "lootKillCounterPageLabel", 0, true)
 pageLabel:SetText("")
-pageLabel:SetExtent(58, 20)
+pageLabel:SetExtent(38, 20)
 pageLabel.style:SetAlign(ALIGN_CENTER)
 pageLabel.style:SetFontSize(10)
 pageLabel.style:SetColor(0.84, 0.84, 0.84, 1)
@@ -1095,15 +2252,18 @@ local function ApplyCounterWindowLayout()
 
 	local closeWidth = RoundScaled(32, scale)
 	local closeHeight = RoundScaled(20, scale)
+	local historyWidth = RoundScaled(64, scale)
+	local historyGap = RoundScaled(4, scale)
 	local titleHeight = RoundScaled(24, scale)
 	local statusHeight = RoundScaled(20, scale)
 	local buttonHeight = RoundScaled(22, scale)
-	local clearWidth = RoundScaled(70, scale)
-	local pageWidth = RoundScaled(58, scale)
+	local clearWidth = RoundScaled(48, scale)
+	local viewWidth = RoundScaled(48, scale)
+	local pageWidth = RoundScaled(38, scale)
 	local pageHeight = RoundScaled(20, scale)
-	local navWidth = RoundScaled(56, scale)
-	local navGap = RoundScaled(10, scale)
-	local titleWidth = width - (padding * 3) - closeWidth
+	local navWidth = RoundScaled(48, scale)
+	local navGap = RoundScaled(4, scale)
+	local titleWidth = width - (padding * 3) - closeWidth - historyWidth - historyGap
 	if titleWidth < 80 then
 		titleWidth = 80
 	end
@@ -1117,6 +2277,11 @@ local function ApplyCounterWindowLayout()
 	closeButton:RemoveAllAnchors()
 	closeButton:AddAnchor("TOPRIGHT", counterWindow, -padding, padding - 1)
 	SetWidgetFontSize(closeButton, RoundScaled(11, scale))
+
+	historyButton:SetExtent(historyWidth, closeHeight)
+	historyButton:RemoveAllAnchors()
+	historyButton:AddAnchor("TOPRIGHT", counterWindow, -(padding + closeWidth + historyGap), padding - 1)
+	SetWidgetFontSize(historyButton, RoundScaled(11, scale))
 
 	statusLabel:RemoveAllAnchors()
 	statusLabel:AddAnchor("TOPLEFT", counterWindow, padding, RoundScaled(30, scale))
@@ -1136,6 +2301,11 @@ local function ApplyCounterWindowLayout()
 	clearButton:AddAnchor("BOTTOMLEFT", counterWindow, padding, -padding)
 	SetWidgetFontSize(clearButton, RoundScaled(11, scale))
 
+	viewButton:SetExtent(viewWidth, buttonHeight)
+	viewButton:RemoveAllAnchors()
+	viewButton:AddAnchor("BOTTOMLEFT", counterWindow, padding + clearWidth + navGap, -padding)
+	SetWidgetFontSize(viewButton, RoundScaled(11, scale))
+
 	nextButton:SetExtent(navWidth, buttonHeight)
 	nextButton:RemoveAllAnchors()
 	nextButton:AddAnchor("BOTTOMRIGHT", counterWindow, -padding, -padding)
@@ -1143,8 +2313,9 @@ local function ApplyCounterWindowLayout()
 
 	prevButton:SetExtent(navWidth, buttonHeight)
 	prevButton:RemoveAllAnchors()
-	local prevLeft = padding + clearWidth + navGap
-	local rightGroupLeft = width - padding - navWidth - navGap - pageWidth
+	local prevLeft = padding + clearWidth + navGap + viewWidth + navGap
+	local rightGroupWidth = navWidth + navGap + pageWidth + navGap + navWidth
+	local rightGroupLeft = width - padding - rightGroupWidth
 	if prevLeft + navWidth + navGap < rightGroupLeft then
 		prevButton:AddAnchor("BOTTOMLEFT", counterWindow, prevLeft, -padding)
 	else
@@ -1447,7 +2618,9 @@ local function SetCounterWindowButtonsVisible(visible)
 	end
 	counterWindowButtonsVisible = visible
 	closeButton:Show(visible)
+	historyButton:Show(visible)
 	clearButton:Show(visible)
+	viewButton:Show(visible)
 	prevButton:Show(visible)
 	nextButton:Show(visible)
 end
@@ -1523,7 +2696,9 @@ EnableCounterWindowDrag(titleLabel)
 EnableCounterWindowDrag(statusLabel)
 EnableCounterWindowDrag(pageLabel)
 EnableCounterWindowDrag(closeButton)
+EnableCounterWindowDrag(historyButton)
 EnableCounterWindowDrag(clearButton)
+EnableCounterWindowDrag(viewButton)
 EnableCounterWindowDrag(prevButton)
 EnableCounterWindowDrag(nextButton)
 for index = 1, PAGE_SIZE do
@@ -1534,7 +2709,9 @@ EnableCounterWindowHover(titleLabel)
 EnableCounterWindowHover(statusLabel)
 EnableCounterWindowHover(pageLabel)
 EnableCounterWindowHover(closeButton)
+EnableCounterWindowHover(historyButton)
 EnableCounterWindowHover(clearButton)
+EnableCounterWindowHover(viewButton)
 EnableCounterWindowHover(prevButton)
 EnableCounterWindowHover(nextButton)
 for index = 1, PAGE_SIZE do
@@ -1633,6 +2810,945 @@ function nextButton:OnClick()
 end
 nextButton:SetHandler("OnClick", nextButton.OnClick)
 
+function Analysis.GetSessionKillTotal()
+	local total = 0
+	for _, count in pairs(runtime.sessionKillCounts) do
+		count = tonumber(count)
+		if count ~= nil and count > 0 then
+			total = total + math.floor(count)
+		end
+	end
+	return total
+end
+
+function Analysis.AddReportName(names, seen, name)
+	if not IsValidName(name) then
+		return
+	end
+	name = Trim(name)
+	if seen[name] then
+		return
+	end
+	seen[name] = true
+	names[#names + 1] = name
+end
+
+function Analysis.BuildSortedReportUnitNames()
+	local names = {}
+	local seen = {}
+	for name in pairs(runtime.sessionKillCounts) do
+		Analysis.AddReportName(names, seen, name)
+	end
+	for name in pairs(runtime.damageDealtByUnit) do
+		Analysis.AddReportName(names, seen, name)
+	end
+	for name in pairs(runtime.damageTakenByUnit) do
+		Analysis.AddReportName(names, seen, name)
+	end
+	for name in pairs(runtime.itemDropsByUnit) do
+		Analysis.AddReportName(names, seen, name)
+	end
+	for name in pairs(runtime.expByUnit) do
+		Analysis.AddReportName(names, seen, name)
+	end
+	table.sort(names, function(left, right)
+		local leftKills = tonumber(runtime.sessionKillCounts[left]) or 0
+		local rightKills = tonumber(runtime.sessionKillCounts[right]) or 0
+		if leftKills ~= rightKills then
+			return leftKills > rightKills
+		end
+		local leftDamage = tonumber(runtime.damageDealtByUnit[left]) or 0
+		local rightDamage = tonumber(runtime.damageDealtByUnit[right]) or 0
+		if leftDamage ~= rightDamage then
+			return leftDamage > rightDamage
+		end
+		local leftTaken = tonumber(runtime.damageTakenByUnit[left]) or 0
+		local rightTaken = tonumber(runtime.damageTakenByUnit[right]) or 0
+		if leftTaken ~= rightTaken then
+			return leftTaken > rightTaken
+		end
+		return string.lower(left) < string.lower(right)
+	end)
+	return names
+end
+
+function Analysis.BuildSortedDropNames(drops)
+	local names = {}
+	if type(drops) ~= "table" then
+		return names
+	end
+	for itemName, count in pairs(drops) do
+		if IsValidName(itemName) and tonumber(count) ~= nil and tonumber(count) > 0 then
+			names[#names + 1] = itemName
+		end
+	end
+	table.sort(names, function(left, right)
+		local leftCount = tonumber(drops[left]) or 0
+		local rightCount = tonumber(drops[right]) or 0
+		if leftCount ~= rightCount then
+			return leftCount > rightCount
+		end
+		return string.lower(left) < string.lower(right)
+	end)
+	return names
+end
+
+function Analysis.BuildDropSummary(mobName, maxItems)
+	local drops = runtime.itemDropsByUnit[mobName]
+	local dropNames = Analysis.BuildSortedDropNames(drops)
+	if #dropNames == 0 then
+		return ""
+	end
+	maxItems = tonumber(maxItems) or 4
+	local parts = {}
+	for index, itemName in ipairs(dropNames) do
+		if index > maxItems then
+			parts[#parts + 1] = "+" .. tostring(#dropNames - maxItems) .. " more"
+			break
+		end
+		parts[#parts + 1] = itemName .. " x" .. Analysis.FormatAmount(drops[itemName])
+	end
+	return table.concat(parts, ", ")
+end
+
+function Analysis.BuildSortedAmountKeys(amountsByKey)
+	local keys = {}
+	if type(amountsByKey) ~= "table" then
+		return keys
+	end
+	for key, amount in pairs(amountsByKey) do
+		if tonumber(amount) ~= nil and tonumber(amount) > 0 then
+			keys[#keys + 1] = key
+		end
+	end
+	table.sort(keys, function(left, right)
+		local leftAmount = tonumber(amountsByKey[left]) or 0
+		local rightAmount = tonumber(amountsByKey[right]) or 0
+		if leftAmount ~= rightAmount then
+			return leftAmount > rightAmount
+		end
+		return string.lower(tostring(left)) < string.lower(tostring(right))
+	end)
+	return keys
+end
+
+function Analysis.InferSkillCategory(skillKey, entry)
+	if type(entry) == "table" then
+		local category = Trim(entry.category or "")
+		if category ~= "" then
+			return category
+		end
+	end
+	skillKey = tostring(skillKey or "")
+	local separator = string.find(skillKey, "::", 1, true)
+	if separator ~= nil then
+		return string.sub(skillKey, 1, separator - 1)
+	end
+	if skillKey == "Melee Attack" or skillKey == "Melee" then
+		return "Melee"
+	end
+	return "Spell"
+end
+
+function Analysis.RebuildDamageCategories()
+	runtime.damageByCategory = {}
+	for skillKey, entry in pairs(runtime.damageBySkill) do
+		if type(entry) == "table" then
+			local damageAmount = tonumber(entry.damage) or 0
+			if damageAmount > 0 then
+				local category = Analysis.InferSkillCategory(skillKey, entry)
+				entry.category = category
+				runtime.damageByCategory[category] =
+					(tonumber(runtime.damageByCategory[category]) or 0) + damageAmount
+			end
+		end
+	end
+end
+
+function Analysis.EnsureDamageCategories()
+	if type(runtime.damageByCategory) ~= "table" then
+		runtime.damageByCategory = {}
+	end
+	for _, amount in pairs(runtime.damageByCategory) do
+		if tonumber(amount) ~= nil and tonumber(amount) > 0 then
+			return
+		end
+	end
+	Analysis.RebuildDamageCategories()
+end
+
+function Analysis.BuildSortedCategories()
+	local categories = {}
+	local seen = {}
+	Analysis.EnsureDamageCategories()
+	for _, categoryName in ipairs(Analysis.DAMAGE_CATEGORY_ORDER) do
+		local amount = tonumber(runtime.damageByCategory[categoryName]) or 0
+		if amount > 0 then
+			categories[#categories + 1] = categoryName
+			seen[categoryName] = true
+		end
+	end
+	for categoryName, amount in pairs(runtime.damageByCategory) do
+		if not seen[categoryName] and tonumber(amount) ~= nil and tonumber(amount) > 0 then
+			categories[#categories + 1] = categoryName
+		end
+	end
+	return categories
+end
+
+function Analysis.BuildSortedEntryKeys(tableData, amountField)
+	local amountsByKey = {}
+	if type(tableData) ~= "table" then
+		return amountsByKey
+	end
+	for entryKey, entry in pairs(tableData) do
+		if type(entry) == "table" then
+			local amount = tonumber(entry[amountField]) or 0
+			if amount > 0 then
+				amountsByKey[entryKey] = amount
+			end
+		end
+	end
+	return Analysis.BuildSortedAmountKeys(amountsByKey)
+end
+
+function Analysis.GetPlayerDamageTotal()
+	local total = 0
+	for _, entry in pairs(runtime.damageBySkill) do
+		if type(entry) == "table" then
+			local amount = tonumber(entry.damage)
+			if amount ~= nil and amount > 0 then
+				total = total + math.floor(amount)
+			end
+		end
+	end
+	if total > 0 then
+		return total
+	end
+	return math.floor((tonumber(runtime.totalDamageDealt) or 0) + 0.5)
+end
+
+function Analysis.GetPlayerHealTotal()
+	local total = 0
+	for _, entry in pairs(runtime.healBySkill) do
+		if type(entry) == "table" then
+			local amount = tonumber(entry.amount)
+			if amount ~= nil and amount > 0 then
+				total = total + math.floor(amount)
+			end
+		end
+	end
+	return total
+end
+
+function Analysis.GetPlayerDps(totalDamage)
+	totalDamage = tonumber(totalDamage) or Analysis.GetPlayerDamageTotal()
+	local duration = Analysis.GetKillCombatDuration(RefreshClock())
+	if duration <= 0 then
+		return 0
+	end
+	return totalDamage / duration
+end
+
+function Analysis.CleanAbilityDisplayName(skillKey, entry)
+	local displayName = Trim((entry and entry.name) or skillKey or "")
+	local separator = string.find(displayName, "::", 1, true)
+	if separator ~= nil then
+		displayName = Trim(string.sub(displayName, separator + 2))
+	end
+	separator = string.find(skillKey or "", "::", 1, true)
+	if displayName == "" and separator ~= nil then
+		displayName = Trim(string.sub(skillKey, separator + 2))
+	end
+	if displayName == "" then
+		displayName = "Unknown"
+	end
+	return displayName
+end
+
+function Analysis.FormatSkillAnalysisLine(name, amount, hits, percentText)
+	hits = tonumber(hits) or 0
+	local average = 0
+	if hits > 0 then
+		average = (tonumber(amount) or 0) / hits
+	end
+	return string.format(
+		"  %-18s %8s %4d %6s %5s",
+		Analysis.TruncateText(name, 18),
+		Analysis.FormatDamage(amount),
+		hits,
+		Analysis.FormatDamage(average),
+		percentText
+	)
+end
+
+function Analysis.FormatSimpleAmountLine(name, amount, percentText)
+	return string.format(
+		"  %-22s %10s  (%s)",
+		Analysis.TruncateText(name, 22),
+		Analysis.FormatDamage(amount),
+		percentText
+	)
+end
+
+function Analysis.BuildCompactBreakdown(amountsByKey, total, maxItems)
+	local keys = Analysis.BuildSortedAmountKeys(amountsByKey)
+	local parts = {}
+	maxItems = tonumber(maxItems) or 4
+	for index, key in ipairs(keys) do
+		if index > maxItems then
+			parts[#parts + 1] = "+" .. tostring(#keys - maxItems) .. " more"
+			break
+		end
+		local amount = tonumber(amountsByKey[key]) or 0
+		parts[#parts + 1] = tostring(key) .. " " .. Analysis.FormatPercent(amount, total)
+	end
+	return table.concat(parts, ", ")
+end
+
+function Analysis.AppendCombatReviewLines(lines)
+	local stats = Analysis.EnsurePlayerCombatStats()
+	local totalDamage = Analysis.GetPlayerDamageTotal()
+	local totalHealing = Analysis.GetPlayerHealTotal()
+	local hits = tonumber(stats.totalHits) or 0
+	local misses = tonumber(stats.totalMisses) or 0
+	local damageTaken = tonumber(stats.totalDamageTaken) or 0
+	local healingReceived = tonumber(stats.totalHealingReceived) or 0
+	if damageTaken < (tonumber(runtime.totalDamageTaken) or 0) then
+		damageTaken = tonumber(runtime.totalDamageTaken) or 0
+	end
+	local energizeKeys = Analysis.BuildSortedEntryKeys(runtime.energizeBySkill, "amount")
+	if totalDamage <= 0
+		and totalHealing <= 0
+		and misses <= 0
+		and damageTaken <= 0
+		and healingReceived <= 0
+		and #energizeKeys == 0
+	then
+		return true
+	end
+
+	local duration = Analysis.GetKillCombatDuration(RefreshClock())
+	Analysis.AddViewLine(lines, "spacer", "")
+	Analysis.AddViewLine(lines, "header", "Combat Review")
+	if totalDamage > 0 then
+		Analysis.AddViewLine(
+			lines,
+			"metric",
+			"  Damage "
+				.. Analysis.FormatDamage(totalDamage)
+				.. " | DPS "
+				.. Analysis.FormatDps(Analysis.GetPlayerDps(totalDamage))
+				.. " | Hits "
+				.. tostring(hits)
+				.. " | Avg "
+				.. Analysis.FormatDamage(hits > 0 and (totalDamage / hits) or 0)
+				.. " | Max "
+				.. Analysis.FormatDamage(stats.largestHit or 0)
+		)
+	end
+	if totalHealing > 0 then
+		local healHits = tonumber(stats.totalHealingHits) or 0
+		local hps = 0
+		if duration > 0 then
+			hps = totalHealing / duration
+		end
+		Analysis.AddViewLine(
+			lines,
+			"heal",
+			"  Healing "
+				.. Analysis.FormatDamage(totalHealing)
+				.. " | HPS "
+				.. Analysis.FormatDps(hps)
+				.. " | Casts "
+				.. tostring(healHits)
+				.. " | Max "
+				.. Analysis.FormatDamage(stats.largestHeal or 0)
+		)
+	end
+	if misses > 0 or damageTaken > 0 or healingReceived > 0 then
+		Analysis.AddViewLine(
+			lines,
+			misses > 0 and "warning" or "metric",
+			"  Misses "
+				.. tostring(misses)
+				.. " | Taken "
+				.. Analysis.FormatDamage(damageTaken)
+				.. " | Healed by others "
+				.. Analysis.FormatDamage(healingReceived)
+		)
+	end
+
+	local categoryText = Analysis.BuildCompactBreakdown(runtime.damageByCategory, totalDamage, 4)
+	if categoryText ~= "" then
+		Analysis.AddViewLine(lines, "category", Analysis.TruncateText("  Sources: " .. categoryText, 100))
+	end
+
+	local skillKeys = Analysis.BuildSortedEntryKeys(runtime.damageBySkill, "damage")
+	if #skillKeys > 0 then
+		Analysis.AddViewLine(lines, "header", "Damage by Skill")
+		Analysis.AddViewLine(lines, "metric", "  Ability               Damage Hits    Avg Share")
+		for skillIndex, skillKey in ipairs(skillKeys) do
+			if skillIndex > 5 then
+				Analysis.AddViewLine(lines, "metric", "  ... +" .. tostring(#skillKeys - 5) .. " more damage skills")
+				break
+			end
+			local entry = runtime.damageBySkill[skillKey] or {}
+			local damage = tonumber(entry.damage) or 0
+			local displayName = Analysis.CleanAbilityDisplayName(skillKey, entry)
+			local missCount = tonumber((runtime.missesBySkill[skillKey] or {}).count) or 0
+			if missCount > 0 then
+				displayName = displayName .. " (" .. tostring(missCount) .. " miss)"
+			end
+			Analysis.AddViewLine(
+				lines,
+				"skill",
+				Analysis.FormatSkillAnalysisLine(
+					displayName,
+					damage,
+					tonumber(entry.hits) or 0,
+					Analysis.FormatPercent(damage, totalDamage)
+				)
+			)
+		end
+	end
+
+	local healKeys = Analysis.BuildSortedEntryKeys(runtime.healBySkill, "amount")
+	if #healKeys > 0 then
+		Analysis.AddViewLine(lines, "header", "Healing by Skill")
+		for healIndex, skillKey in ipairs(healKeys) do
+			if healIndex > 3 then
+				Analysis.AddViewLine(lines, "metric", "  ... +" .. tostring(#healKeys - 3) .. " more heals")
+				break
+			end
+			local entry = runtime.healBySkill[skillKey] or {}
+			local amount = tonumber(entry.amount) or 0
+			Analysis.AddViewLine(
+				lines,
+				"heal",
+				Analysis.FormatSkillAnalysisLine(
+					Analysis.CleanAbilityDisplayName(skillKey, entry),
+					amount,
+					tonumber(entry.hits) or 0,
+					Analysis.FormatPercent(amount, totalHealing)
+				)
+			)
+		end
+	end
+
+	if #energizeKeys > 0 then
+		Analysis.AddViewLine(lines, "header", "Resource Energize")
+		for energizeIndex, skillKey in ipairs(energizeKeys) do
+			if energizeIndex > 3 then
+				break
+			end
+			local entry = runtime.energizeBySkill[skillKey] or {}
+			Analysis.AddViewLine(
+				lines,
+				"metric",
+				Analysis.FormatSimpleAmountLine(
+					Analysis.CleanAbilityDisplayName(skillKey, entry),
+					tonumber(entry.amount) or 0,
+					tostring(tonumber(entry.hits) or 0) .. " events"
+				)
+			)
+		end
+	end
+	return true
+end
+
+Analysis.VIEW_LINE_COLORS = {
+	header = { 0.95, 0.92, 0.82, 1 },
+	metric = { 0.82, 0.88, 0.96, 1 },
+	category = { 0.85, 0.78, 0.65, 1 },
+	skill = { 1, 1, 1, 1 },
+	heal = { 0.55, 0.95, 0.75, 1 },
+	target = { 0.92, 0.92, 0.92, 1 },
+	unit = { 1, 1, 1, 1 },
+	drop = { 0.92, 0.86, 0.62, 1 },
+	warning = { 1, 0.52, 0.48, 1 },
+	spacer = { 0.5, 0.5, 0.5, 0 },
+}
+
+function Analysis.ApplyViewLineStyle(label, kind)
+	if label == nil or label.style == nil then
+		return
+	end
+	local colors = Analysis.VIEW_LINE_COLORS[kind] or Analysis.VIEW_LINE_COLORS.unit
+	label.style:SetColor(colors[1], colors[2], colors[3], colors[4])
+	label.style:SetFontSize(kind == "header" and 10 or 9)
+end
+
+function Analysis.AddViewLine(lines, kind, text)
+	if #lines >= VIEW_CONTENT_ROW_COUNT then
+		if lines.overflowShown ~= true then
+			lines[VIEW_CONTENT_ROW_COUNT] = { kind = "warning", text = "  ... additional session data not shown" }
+			lines.overflowShown = true
+		end
+		return false
+	end
+	lines[#lines + 1] = { kind = kind, text = text }
+	return true
+end
+
+function Analysis.BuildViewDisplayLines()
+	local lines = {}
+	local unitNames = Analysis.BuildSortedReportUnitNames()
+	local sessionKills = Analysis.GetSessionKillTotal()
+	local totalDamageDealt = tonumber(runtime.totalDamageDealt) or 0
+	local totalDamageTaken = tonumber(runtime.totalDamageTaken) or 0
+	local totalExpGained = tonumber(runtime.totalExpGained) or 0
+	local totalManaSpent = tonumber(runtime.totalManaSpent) or 0
+	local totalDroppedItems = tonumber(runtime.totalDroppedItems) or 0
+	local totalKillTime = Analysis.GetKillCombatDuration(RefreshClock())
+	local playerCombatStats = Analysis.EnsurePlayerCombatStats()
+	local totalCombatDamage = Analysis.GetPlayerDamageTotal()
+	local totalHealing = Analysis.GetPlayerHealTotal()
+	local totalMisses = tonumber(playerCombatStats.totalMisses) or 0
+	local totalHealingReceived = tonumber(playerCombatStats.totalHealingReceived) or 0
+	local energizeKeys = Analysis.BuildSortedEntryKeys(runtime.energizeBySkill, "amount")
+
+	if #unitNames == 0
+		and sessionKills <= 0
+		and totalDamageDealt <= 0
+		and totalDamageTaken <= 0
+		and totalCombatDamage <= 0
+		and totalHealing <= 0
+		and totalMisses <= 0
+		and totalHealingReceived <= 0
+		and #energizeKeys == 0
+		and totalExpGained <= 0
+		and totalManaSpent <= 0
+		and totalDroppedItems <= 0
+	then
+		Analysis.AddViewLine(lines, "unit", "  No session data recorded yet.")
+		Analysis.AddViewLine(lines, "metric", "  Kill mobs or loot items, then open View again.")
+		return lines
+	end
+
+	Analysis.AddViewLine(lines, "header", "Session Totals")
+	Analysis.AddViewLine(
+		lines,
+		"metric",
+		"  Kills "
+			.. Analysis.FormatAmount(sessionKills)
+			.. " | Time "
+			.. Analysis.FormatDuration(totalKillTime)
+			.. " | Mana "
+			.. Analysis.FormatAmount(totalManaSpent)
+			.. " | EXP "
+			.. Analysis.FormatAmount(totalExpGained)
+	)
+	Analysis.AddViewLine(
+		lines,
+		"metric",
+		"  Damage dealt "
+			.. Analysis.FormatAmount(totalDamageDealt)
+			.. " | Damage taken "
+			.. Analysis.FormatAmount(totalDamageTaken)
+			.. " | Items "
+			.. Analysis.FormatAmount(totalDroppedItems)
+	)
+	Analysis.AppendCombatReviewLines(lines)
+	Analysis.AddViewLine(lines, "spacer", "")
+	Analysis.AddViewLine(lines, "header", "Units")
+
+	for _, mobName in ipairs(unitNames) do
+		local unitLine = "  "
+			.. mobName
+			.. ": kills "
+			.. Analysis.FormatAmount(runtime.sessionKillCounts[mobName])
+			.. " | dealt "
+			.. Analysis.FormatAmount(runtime.damageDealtByUnit[mobName])
+			.. " | taken "
+			.. Analysis.FormatAmount(runtime.damageTakenByUnit[mobName])
+			.. " | exp "
+			.. Analysis.FormatAmount(runtime.expByUnit[mobName])
+		if not Analysis.AddViewLine(lines, "unit", Analysis.TruncateText(unitLine, 100)) then
+			return lines
+		end
+
+		local dropSummary = Analysis.BuildDropSummary(mobName, 4)
+		if dropSummary ~= "" then
+			if not Analysis.AddViewLine(lines, "drop", Analysis.TruncateText("    drops: " .. dropSummary, 100)) then
+				return lines
+			end
+		end
+	end
+	return lines
+end
+
+function Analysis.HasCurrentSessionData()
+	local stats = Analysis.EnsurePlayerCombatStats()
+	local energizeKeys = Analysis.BuildSortedEntryKeys(runtime.energizeBySkill, "amount")
+	return GetTotalKillCount() > 0
+		or Analysis.GetSessionKillTotal() > 0
+		or (tonumber(runtime.totalDamageDealt) or 0) > 0
+		or (tonumber(runtime.totalDamageTaken) or 0) > 0
+		or Analysis.GetPlayerDamageTotal() > 0
+		or Analysis.GetPlayerHealTotal() > 0
+		or (tonumber(stats.totalMisses) or 0) > 0
+		or (tonumber(stats.totalHealingReceived) or 0) > 0
+		or #energizeKeys > 0
+		or (tonumber(runtime.totalDroppedItems) or 0) > 0
+		or (tonumber(runtime.totalExpGained) or 0) > 0
+		or (tonumber(runtime.totalManaSpent) or 0) > 0
+end
+
+local function BuildCurrentSessionSummary()
+	return "Kills "
+		.. Analysis.FormatAmount(GetTotalKillCount())
+		.. " | Session kills "
+		.. Analysis.FormatAmount(Analysis.GetSessionKillTotal())
+		.. " | Damage "
+		.. Analysis.FormatAmount(Analysis.GetPlayerDamageTotal())
+		.. " | EXP "
+		.. Analysis.FormatAmount(runtime.totalExpGained)
+end
+
+local function CopyViewLines(lines)
+	local copied = {}
+	if type(lines) ~= "table" then
+		return copied
+	end
+	for _, line in ipairs(lines) do
+		if type(line) == "table" then
+			copied[#copied + 1] = {
+				kind = tostring(line.kind or "metric"),
+				text = tostring(line.text or ""),
+			}
+		end
+	end
+	return copied
+end
+
+SaveCurrentSessionToHistory = function()
+	if not Analysis.HasCurrentSessionData() then
+		return false
+	end
+
+	Analysis.SyncSessionResourceSnapshots()
+	local ok, lines = pcall(Analysis.BuildViewDisplayLines)
+	if not ok or type(lines) ~= "table" then
+		lines = {
+			{ kind = "warning", text = "  Failed to build saved session details." },
+			{ kind = "metric", text = "  " .. Analysis.TruncateText(tostring(lines), 90) },
+		}
+	end
+
+	local sessionName = "S" .. tostring(runtime.nextHistorySessionIndex)
+	runtime.nextHistorySessionIndex = runtime.nextHistorySessionIndex + 1
+	runtime.historySessions[#runtime.historySessions + 1] = {
+		name = sessionName,
+		summary = BuildCurrentSessionSummary(),
+		createdAt = RefreshClock(),
+		lines = CopyViewLines(lines),
+	}
+	runtime.historyPage = 1
+	SaveSessionHistory()
+	return true
+end
+
+function Analysis.AddHistoryLine(lines, kind, text)
+	lines[#lines + 1] = { kind = kind, text = text }
+end
+
+function Analysis.BuildAllHistoryDisplayLines()
+	local lines = {}
+	if #runtime.historySessions == 0 then
+		Analysis.AddHistoryLine(lines, "unit", "  No saved sessions yet.")
+		Analysis.AddHistoryLine(lines, "metric", "  Sessions are saved after a loading screen finishes.")
+		return lines
+	end
+
+	for sessionIndex = #runtime.historySessions, 1, -1 do
+		local session = runtime.historySessions[sessionIndex]
+		if type(session) == "table" then
+			Analysis.AddHistoryLine(lines, "header", tostring(session.name or ("S" .. tostring(sessionIndex))))
+			Analysis.AddHistoryLine(lines, "metric", "  " .. Analysis.TruncateText(session.summary or "", 100))
+
+			local shown = 0
+			if type(session.lines) == "table" then
+				for _, line in ipairs(session.lines) do
+					local text = tostring(line.text or "")
+					if text ~= "" and line.kind ~= "spacer" and line.kind ~= "header" then
+						Analysis.AddHistoryLine(lines, line.kind or "metric", Analysis.TruncateText("  " .. Trim(text), 100))
+						shown = shown + 1
+						if shown >= 2 then
+							break
+						end
+					end
+				end
+			end
+			Analysis.AddHistoryLine(lines, "spacer", "")
+		end
+	end
+	return lines
+end
+
+function Analysis.GetHistoryPageInfo(allLines)
+	local totalRows = #allLines
+	local totalPages = math.ceil(totalRows / VIEW_CONTENT_ROW_COUNT)
+	if totalPages < 1 then
+		totalPages = 1
+	end
+	if runtime.historyPage < 1 then
+		runtime.historyPage = 1
+	elseif runtime.historyPage > totalPages then
+		runtime.historyPage = totalPages
+	end
+	return runtime.historyPage, totalPages
+end
+
+function Analysis.BuildHistoryDisplayLines()
+	local allLines = Analysis.BuildAllHistoryDisplayLines()
+	local page, totalPages = Analysis.GetHistoryPageInfo(allLines)
+	local startIndex = ((page - 1) * VIEW_CONTENT_ROW_COUNT) + 1
+	local lines = {}
+	for rowIndex = 1, VIEW_CONTENT_ROW_COUNT do
+		local line = allLines[startIndex + rowIndex - 1]
+		if line == nil then
+			break
+		end
+		lines[#lines + 1] = line
+	end
+	return lines, page, totalPages
+end
+
+local viewWindowX, viewWindowY = LoadPosition(VIEW_WINDOW_POSITION_KEY, 720, 318)
+local viewWindow = CreateEmptyWindow("lootKillCounterViewWindow", "UIParent")
+runtime.viewWindow = viewWindow
+viewWindow:SetExtent(VIEW_WINDOW_WIDTH, VIEW_WINDOW_HEIGHT)
+viewWindow:AddAnchor("TOPLEFT", "UIParent", viewWindowX, viewWindowY)
+viewWindow:EnableDrag(true)
+viewWindow:Clickable(true)
+viewWindow:Show(false)
+
+local viewBackground = viewWindow:CreateColorDrawable(0, 0, 0, 0.72, "background")
+viewBackground:AddAnchor("TOPLEFT", viewWindow, 0, 0)
+viewBackground:AddAnchor("BOTTOMRIGHT", viewWindow, 0, 0)
+
+local viewTitleLabel = viewWindow:CreateChildWidget("label", "lootKillCounterViewTitle", 0, true)
+runtime.viewTitleLabel = viewTitleLabel
+viewTitleLabel:SetText("Kill Session Analysis")
+viewTitleLabel:SetExtent(VIEW_WINDOW_WIDTH - (PADDING * 2) - 220, 24)
+viewTitleLabel.style:SetAlign(ALIGN_LEFT)
+viewTitleLabel.style:SetFontSize(13)
+viewTitleLabel.style:SetColor(0.95, 0.92, 0.82, 1)
+viewTitleLabel.style:SetOutline(true)
+viewTitleLabel:AddAnchor("TOPLEFT", viewWindow, PADDING, 10)
+
+local viewCloseButton = viewWindow:CreateChildWidget("button", "lootKillCounterViewCloseButton", 0, true)
+runtime.viewCloseButton = viewCloseButton
+viewCloseButton:SetStyle("text_default")
+viewCloseButton:SetText("X")
+viewCloseButton:SetExtent(32, 20)
+viewCloseButton:AddAnchor("TOPRIGHT", viewWindow, -PADDING, 9)
+
+local historyClearButton = viewWindow:CreateChildWidget("button", "lootKillCounterHistoryClearButton", 0, true)
+historyClearButton:SetStyle("text_default")
+historyClearButton:SetText("Clear")
+historyClearButton:SetExtent(48, 20)
+historyClearButton:AddAnchor("TOPRIGHT", viewWindow, -PADDING - 36, 9)
+
+local historyNextButton = viewWindow:CreateChildWidget("button", "lootKillCounterHistoryNextButton", 0, true)
+historyNextButton:SetStyle("text_default")
+historyNextButton:SetText("Next")
+historyNextButton:SetExtent(44, 20)
+historyNextButton:AddAnchor("TOPRIGHT", viewWindow, -PADDING - 88, 9)
+
+local historyPageLabel = viewWindow:CreateChildWidget("label", "lootKillCounterHistoryPageLabel", 0, true)
+historyPageLabel:SetText("")
+historyPageLabel:SetExtent(44, 20)
+historyPageLabel.style:SetAlign(ALIGN_CENTER)
+historyPageLabel.style:SetFontSize(10)
+historyPageLabel.style:SetColor(0.84, 0.84, 0.84, 1)
+historyPageLabel.style:SetOutline(true)
+historyPageLabel:AddAnchor("TOPRIGHT", viewWindow, -PADDING - 136, 10)
+
+local historyPrevButton = viewWindow:CreateChildWidget("button", "lootKillCounterHistoryPrevButton", 0, true)
+historyPrevButton:SetStyle("text_default")
+historyPrevButton:SetText("Prev")
+historyPrevButton:SetExtent(44, 20)
+historyPrevButton:AddAnchor("TOPRIGHT", viewWindow, -PADDING - 184, 9)
+
+local viewSummaryLabel = viewWindow:CreateChildWidget("label", "lootKillCounterViewSummary", 0, true)
+runtime.viewSummaryLabel = viewSummaryLabel
+viewSummaryLabel:SetText("")
+viewSummaryLabel:SetExtent(VIEW_WINDOW_WIDTH - (PADDING * 2), 36)
+viewSummaryLabel.style:SetAlign(ALIGN_LEFT)
+viewSummaryLabel.style:SetFontSize(10)
+viewSummaryLabel.style:SetColor(0.78, 0.84, 0.92, 1)
+viewSummaryLabel.style:SetOutline(true)
+viewSummaryLabel:AddAnchor("TOPLEFT", viewWindow, PADDING, 34)
+
+for index = 1, VIEW_CONTENT_ROW_COUNT do
+	local row = viewWindow:CreateChildWidget("label", "lootKillCounterViewRow" .. tostring(index), 0, true)
+	row:SetText("")
+	row:SetExtent(VIEW_WINDOW_WIDTH - (PADDING * 2), VIEW_ROW_HEIGHT)
+	row.style:SetAlign(ALIGN_LEFT)
+	row.style:SetFontSize(9)
+	row.style:SetColor(1, 1, 1, 1)
+	row.style:SetOutline(true)
+	row:AddAnchor("TOPLEFT", viewWindow, PADDING, VIEW_ROW_TOP + ((index - 1) * VIEW_ROW_HEIGHT))
+	runtime.viewContentRows[index] = row
+end
+
+local function SetHistoryViewControlsVisible(visible, hasPages)
+	historyClearButton:Show(visible and #runtime.historySessions > 0)
+	historyPrevButton:Show(visible and hasPages == true)
+	historyPageLabel:Show(visible and hasPages == true)
+	historyNextButton:Show(visible and hasPages == true)
+end
+SetHistoryViewControlsVisible(false, false)
+
+UpdateViewWindow = function()
+	if runtime.viewSummaryLabel == nil then
+		return
+	end
+	if runtime.viewMode == "history" then
+		runtime.viewTitleLabel:SetText("Kill Session History")
+		runtime.viewTitleLabel:SetExtent(VIEW_WINDOW_WIDTH - (PADDING * 2) - 220, 24)
+		local latest = runtime.historySessions[#runtime.historySessions]
+		local summaryText = tostring(#runtime.historySessions) .. " saved sessions"
+		if type(latest) == "table" and latest.name ~= nil then
+			summaryText = summaryText .. " | Latest " .. tostring(latest.name)
+		end
+		runtime.viewSummaryLabel:SetText(summaryText)
+		local historyLines, page, totalPages = Analysis.BuildHistoryDisplayLines()
+		local hasPages = totalPages > 1
+		historyPageLabel:SetText(tostring(page) .. "/" .. tostring(totalPages))
+		SetHistoryViewControlsVisible(true, hasPages)
+		for rowIndex = 1, VIEW_CONTENT_ROW_COUNT do
+			local row = runtime.viewContentRows[rowIndex]
+			if row ~= nil then
+				local line = historyLines[rowIndex]
+				if line == nil then
+					row:SetText("")
+				else
+					Analysis.ApplyViewLineStyle(row, line.kind)
+					row:SetText(tostring(line.text or ""))
+				end
+			end
+		end
+		return
+	end
+
+	SetHistoryViewControlsVisible(false, false)
+	runtime.viewTitleLabel:SetText("Kill Session Analysis")
+	runtime.viewTitleLabel:SetExtent(VIEW_WINDOW_WIDTH - (PADDING * 2) - 36, 24)
+	local playerName = GetLocalPlayerName() or "You"
+	local summaryText = playerName
+		.. " | Kills "
+		.. Analysis.FormatAmount(Analysis.GetSessionKillTotal())
+		.. " | Time "
+		.. Analysis.FormatDuration(Analysis.GetKillCombatDuration(RefreshClock()))
+		.. " | Mana "
+		.. Analysis.FormatAmount(runtime.totalManaSpent)
+		.. " | EXP "
+		.. Analysis.FormatAmount(runtime.totalExpGained)
+	runtime.viewSummaryLabel:SetText(Analysis.TruncateText(summaryText, 120))
+
+	local lines = Analysis.BuildViewDisplayLines()
+	for rowIndex = 1, VIEW_CONTENT_ROW_COUNT do
+		local row = runtime.viewContentRows[rowIndex]
+		if row ~= nil then
+			local line = lines[rowIndex]
+			if line == nil then
+				row:SetText("")
+			else
+				Analysis.ApplyViewLineStyle(row, line.kind)
+				row:SetText(tostring(line.text or ""))
+			end
+		end
+	end
+end
+
+RefreshViewWindowIfVisible = function()
+	if runtime.viewWindow == nil or UpdateViewWindow == nil then
+		return
+	end
+	local ok, visible = SafeCall(runtime.viewWindow, "IsVisible")
+	if ok and visible then
+		UpdateViewWindow()
+	end
+end
+
+function runtime:ShowViewWindow()
+	runtime.viewMode = "current"
+	Analysis.SyncSessionResourceSnapshots()
+	if UpdateViewWindow ~= nil then
+		UpdateViewWindow()
+	end
+	viewWindow:Show(true)
+	SafeCall(viewWindow, "CorrectOffsetByScreen")
+	SafeCall(viewWindow, "Raise")
+end
+
+function runtime:ShowHistoryWindow()
+	runtime.viewMode = "history"
+	runtime.historyPage = 1
+	if UpdateViewWindow ~= nil then
+		UpdateViewWindow()
+	end
+	viewWindow:Show(true)
+	SafeCall(viewWindow, "CorrectOffsetByScreen")
+	SafeCall(viewWindow, "Raise")
+end
+
+function viewButton:OnClick()
+	if WasCounterWindowDragged(self) then
+		return
+	end
+	runtime:ShowViewWindow()
+end
+viewButton:SetHandler("OnClick", viewButton.OnClick)
+
+function historyButton:OnClick()
+	if WasCounterWindowDragged(self) then
+		return
+	end
+	runtime:ShowHistoryWindow()
+end
+historyButton:SetHandler("OnClick", historyButton.OnClick)
+
+function viewCloseButton:OnClick()
+	viewWindow:Show(false)
+end
+viewCloseButton:SetHandler("OnClick", viewCloseButton.OnClick)
+
+function historyClearButton:OnClick()
+	ClearSessionHistory()
+end
+historyClearButton:SetHandler("OnClick", historyClearButton.OnClick)
+
+function historyPrevButton:OnClick()
+	runtime.historyPage = runtime.historyPage - 1
+	if UpdateViewWindow ~= nil then
+		UpdateViewWindow()
+	end
+end
+historyPrevButton:SetHandler("OnClick", historyPrevButton.OnClick)
+
+function historyNextButton:OnClick()
+	runtime.historyPage = runtime.historyPage + 1
+	if UpdateViewWindow ~= nil then
+		UpdateViewWindow()
+	end
+end
+historyNextButton:SetHandler("OnClick", historyNextButton.OnClick)
+
+function viewWindow:OnDragStart()
+	self:StartMoving()
+end
+viewWindow:SetHandler("OnDragStart", viewWindow.OnDragStart)
+
+function viewWindow:OnDragStop()
+	self:StopMovingOrSizing()
+	SaveWidgetPosition(self, VIEW_WINDOW_POSITION_KEY)
+end
+viewWindow:SetHandler("OnDragStop", viewWindow.OnDragStop)
+
 local eventWindow = CreateEmptyWindow("lootKillCounterEventWindow", "UIParent")
 runtime.eventWindow = eventWindow
 eventWindow:Show(false)
@@ -1642,9 +3758,38 @@ function eventWindow:OnEvent(event, ...)
 		return
 	end
 	RefreshClock()
+	if event == "ENTERED_LOADING" then
+		runtime.gameLoadingStarted = true
+		return
+	end
+	if event == "LEFT_LOADING" then
+		if runtime.gameLoadingStarted then
+			SaveCurrentSessionToHistory()
+			ClearKillCounts()
+		end
+		runtime.gameLoadingStarted = false
+		return
+	end
 	if event == "COMBAT_MSG" then
 		UpdateCurrentTarget(true)
 		HandleCombatMessage(...)
+		return
+	end
+	if event == "ITEM_ACQUISITION_BY_LOOT" then
+		Analysis.HandleLootAcquisitionEvent(...)
+		return
+	end
+	if event == "LOOT_BAG_CHANGED" then
+		Analysis.ScheduleBagDropSync()
+		return
+	end
+	if event == "LOOT_BAG_CLOSE" then
+		runtime.pendingBagSyncUntil = nil
+		Analysis.SyncBagDrops(true)
+		return
+	end
+	if event == "EXP_CHANGED" then
+		Analysis.HandleExpChangedEvent(...)
 		return
 	end
 	if event == "SPELLCAST_START" or event == "SPELLCAST_SUCCEEDED" then
@@ -1663,11 +3808,17 @@ end
 eventWindow:SetHandler("OnEvent", eventWindow.OnEvent)
 
 eventWindow:RegisterEvent("COMBAT_MSG")
+eventWindow:RegisterEvent("ITEM_ACQUISITION_BY_LOOT")
+eventWindow:RegisterEvent("LOOT_BAG_CHANGED")
+eventWindow:RegisterEvent("LOOT_BAG_CLOSE")
+eventWindow:RegisterEvent("EXP_CHANGED")
 eventWindow:RegisterEvent("SPELLCAST_START")
 eventWindow:RegisterEvent("SPELLCAST_SUCCEEDED")
 eventWindow:RegisterEvent("TARGET_CHANGED")
 eventWindow:RegisterEvent("TARGET_TO_TARGET_CHANGED")
 eventWindow:RegisterEvent("AGGRO_METER_CLEARED")
+eventWindow:RegisterEvent("ENTERED_LOADING")
+eventWindow:RegisterEvent("LEFT_LOADING")
 
 function eventWindow:OnUpdate(dt)
 	if not runtime.active then
@@ -1685,6 +3836,14 @@ function eventWindow:OnUpdate(dt)
 		return
 	end
 	runtime.updateElapsed = 0
+	Analysis.SyncSessionResourceSnapshots()
+	if runtime.pendingBagSyncUntil ~= nil then
+		Analysis.SyncBagDrops(false)
+		if now >= runtime.pendingBagSyncUntil then
+			runtime.pendingBagSyncUntil = nil
+		end
+	end
+	Analysis.EvaluateKillCombatEnd(now)
 	PruneTargetSnapshots()
 	PrunePendingTargetHits()
 	UpdateCurrentTarget()
