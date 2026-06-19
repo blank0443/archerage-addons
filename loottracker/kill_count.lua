@@ -11,6 +11,7 @@ ADDON:ImportObject(OBJECT_TYPE.LABEL)
 ADDON:ImportAPI(API_TYPE.UNIT.id)
 ADDON:ImportAPI(API_TYPE.PLAYER.id)
 ADDON:ImportAPI(API_TYPE.BAG.id)
+ADDON:ImportAPI(API_TYPE.WORLD.id)
 
 local SAVE_KEY = "lootKillCounterKills"
 local HISTORY_SAVE_KEY = "lootKillCounterHistory"
@@ -49,6 +50,160 @@ local PLAYER_COMBAT_EXIT_GRACE = 1.5
 local PENDING_CAPTURE_DEDUPE_SECONDS = 0.35
 local MAX_PENDING_HITS_PER_TARGET = 4
 local MAX_PENDING_HITS_TOTAL = 20
+local ZONE_GROUP_NAMES = {
+	[1] = "Gweonid Forest",
+	[2] = "Marianople",
+	[3] = "Dewstone Plains",
+	[4] = "Solis Headlands",
+	[5] = "Solzreed Peninsula",
+	[6] = "Lilyut Hills",
+	[7] = "Arcum Iris",
+	[8] = "Two Crowns",
+	[9] = "Mahadevi",
+	[10] = "Airain Rock",
+	[11] = "Falcorth Plains",
+	[12] = "Villanelle",
+	[13] = "Sunbite Wilds",
+	[14] = "Windscour Savannah",
+	[15] = "Perinoor Ruins",
+	[16] = "Rookborne Basin",
+	[17] = "Ynystere",
+	[18] = "White Arden",
+	[19] = "Karkasse Ridgelands",
+	[20] = "Cinderstone Moor",
+	[21] = "Aubre Cradle",
+	[22] = "Halcyona",
+	[23] = "Hasla",
+	[24] = "Tigerspine Mountains",
+	[25] = "Silent Forest",
+	[26] = "Hellswamp",
+	[27] = "Sanddeep",
+	[28] = "The Wastes",
+	[29] = "Libertia Sea",
+	[30] = "Castaway Strait",
+	[31] = "Drill Camp",
+	[32] = "Dreadnought",
+	[33] = "Heedmar",
+	[34] = "Nuimari",
+	[36] = "Arcadian Sea",
+	[39] = "Halcyona Gulf",
+	[40] = "Feuille Sound",
+	[41] = "Forbidden Sea",
+	[42] = "Forbidden Shore",
+	[43] = "Marcala",
+	[44] = "Calmlands",
+	[45] = "Burnt Castle Armory",
+	[46] = "Hadir Farm",
+	[47] = "Palace Cellar",
+	[48] = "Saltswept Atoll",
+	[49] = "Mirage Isle",
+	[50] = "Sharpwind Mines",
+	[51] = "Howling Abyss",
+	[52] = "Kroloal Cradle",
+	[53] = "Violent Maelstrom Arena",
+	[54] = "Exeloch",
+	[55] = "Serpentis",
+	[56] = "Sungold Fields",
+	[57] = "Golden Ruins",
+	[58] = "Greater Howling Abyss",
+	[59] = "Sunspeck Sea",
+	[60] = "Stormraw Sound",
+	[61] = "Diamond Shores",
+	[62] = "Sea of Drowned Love",
+	[63] = "Reedwind",
+	[64] = "Lesser Sea of Drowned Love",
+	[65] = "Verdant Skychamber",
+	[66] = "Lesser Serpentis",
+	[67] = "Introspect Path",
+	[68] = "Lucius's Dream",
+	[69] = "Evening Botanica",
+	[70] = "Encyclopedia Room",
+	[71] = "Libris Garden",
+	[72] = "Screaming Archives",
+	[73] = "Screening Hall",
+	[74] = "Frozen Study",
+	[75] = "Deranged Bookroom",
+	[76] = "Corner Reading Room",
+	[77] = "Gladiator Arena",
+	[78] = "Mistmerrow",
+	[79] = "Miroir Tundra",
+	[80] = "Shattered Sea",
+	[81] = "New Arena",
+	[82] = "Epherium",
+	[83] = "Greater Hadir Farm",
+	[84] = "Greater Burnt Castle Armory",
+	[85] = "Heart of Ayanad",
+	[86] = "Greater Palace Cellar",
+	[87] = "Greater Sharpwind Mines",
+	[88] = "Greater Kroloal Cradle",
+	[89] = "Mistsong Summit",
+	[90] = "Arena",
+	[91] = "Decisive Arena",
+	[92] = "Free-For-All Arena",
+	[93] = "Ahnimar",
+	[94] = "Ancient Ezna",
+	[95] = "Boiling Sea",
+	[96] = "Sylvina Caldera",
+	[97] = "Bloodsalt Bay",
+	[98] = "Queen's Chamber",
+	[99] = "Rokhala Mountains",
+	[100] = "Queen's Chamber",
+	[101] = "Burnt Castle Cellar",
+	[102] = "Aegis Island",
+	[103] = "Whalesong Harbor",
+	[104] = "Whaleswell Straits",
+	[105] = "Ipnysh Sanctuary",
+	[106] = "Snowball Arena",
+	[107] = "Western Hiram Mountains",
+	[108] = "Golden Plains Battle",
+	[109] = "Golden Plains Battle",
+	[110] = "Eastern Hiram Mountains",
+	[111] = "Screening Hall (Disabled)",
+	[112] = "Frozen Study (Disabled)",
+	[113] = "Deranged Bookroom (Disabled)",
+	[114] = "Corner Reading Room (Disabled)",
+	[115] = "Heart of Ayanad (Disabled)",
+	[116] = "Unused",
+	[117] = "Verdant Skychamber (Disabled)",
+	[118] = "Evening Botanica (Disabled)",
+	[119] = "Constellation Breakroom (Disabled)",
+	[120] = "Abyssal Library",
+	[121] = "Red Dragon's Keep",
+	[122] = "The Fall of Hiram City",
+	[125] = "Noryette Challenge",
+	[126] = "Mistsong Banquet",
+	[127] = "Naval Survival Game (test)",
+	[129] = "Stillwater Gulf",
+	[130] = "Hereafter Rebellion",
+	[131] = "Battle of Mistmerrow",
+	[132] = "Kadum",
+	[133] = "Garden of the Gods",
+	[134] = "Gatekeeper Hall",
+	[135] = "Dairy Cow Dreamland",
+	[136] = "Circle of Authority",
+	[137] = "Delphinad Mirage",
+	[138] = "Test Arena",
+	[139] = "Mysthrane Gorge",
+	[140] = "Ipnya Ridge",
+	[141] = "Skyfin War",
+	[142] = "Queen's Altar",
+	[143] = "Event Arena",
+	[144] = "Guild House",
+	[145] = "Unused",
+	[146] = "Black Thorn Prison",
+	[147] = "Great Prairie of the West",
+	[148] = "Greater Serpentis",
+	[149] = "Squid Game Event Arena",
+	[150] = "Dimensional Boundary Defense Raid",
+	[151] = "Ahnimar Event Arena",
+	[152] = "Goldleaf Forest",
+	[153] = "Make a Splash",
+	[154] = "Nightmare Burnt Castle Armory",
+	[155] = "Crossroads Arena",
+	[156] = "Noryette Arena",
+	[158] = "Island of Abundance",
+	[159] = "Golden Plains Battle",
+}
 local PROJECTILE_CAPTURE_REASONS = {
 	SPELLCAST_START = true,
 	SPELLCAST_SUCCEEDED = true,
@@ -141,6 +296,9 @@ local runtime = {
 	nextHistorySessionIndex = 1,
 	historyPage = 1,
 	gameLoadingStarted = false,
+	sessionLocationText = nil,
+	loadingStartLocationText = nil,
+	locationRefreshElapsed = 0,
 	viewMode = "current",
 }
 _G.__LOOT_KILL_COUNTER_RUNTIME = runtime
@@ -278,6 +436,142 @@ local function IsLocalPlayerName(value)
 		return true
 	end
 	return NamesMatch(value, StripWorldSuffix(GetLocalPlayerName()))
+end
+
+local function NormalizeLocationPart(value)
+	local text = Trim(value)
+	if text == "" or NormalizeName(text) == "unknown" then
+		return ""
+	end
+	return text
+end
+
+local function GetZoneGroupLocationText()
+	local ok, zoneGroup = SafeCall(X2Unit, "GetCurrentZoneGroup")
+	if not ok then
+		return ""
+	end
+	return NormalizeLocationPart(ZONE_GROUP_NAMES[tonumber(zoneGroup)])
+end
+
+local function GetCurrentLocationText()
+	local zone = ""
+	local subZone = ""
+	local ok, value = SafeCall(X2World, "GetZoneText")
+	if ok then
+		zone = NormalizeLocationPart(value)
+	end
+	ok, value = SafeCall(X2World, "GetSubZoneText")
+	if ok then
+		subZone = NormalizeLocationPart(value)
+	end
+
+	local region = zone
+	if region == "" then
+		region = GetZoneGroupLocationText()
+	end
+
+	if region ~= "" and subZone ~= "" and NormalizeName(region) ~= NormalizeName(subZone) then
+		return region .. " (" .. subZone .. ")"
+	end
+	if region ~= "" then
+		return region
+	end
+	return subZone
+end
+
+local function HasRuntimeSessionKills()
+	for _, count in pairs(runtime.sessionKillCounts) do
+		count = tonumber(count)
+		if count ~= nil and count > 0 then
+			return true
+		end
+	end
+	return false
+end
+
+-- Keep the latest non-empty zone in runtime memory so portal/loading saves use
+-- the zone the session took place in, not the destination after loading.
+local function CaptureCurrentSessionLocation(force)
+	local location = GetCurrentLocationText()
+	if location ~= "" then
+		if force or not HasRuntimeSessionKills() or not IsValidName(runtime.sessionLocationText) then
+			runtime.sessionLocationText = location
+		end
+		return runtime.sessionLocationText
+	end
+	return runtime.sessionLocationText
+end
+
+local function CaptureSessionActivityLocation()
+	local location = GetCurrentLocationText()
+	if location ~= "" then
+		-- Activity events can arrive while the client is already resolving the
+		-- destination zone. Once kills exist, keep the farming zone we captured
+		-- earlier so history names do not switch to the arrival location.
+		if not HasRuntimeSessionKills() or not IsValidName(runtime.sessionLocationText) then
+			runtime.sessionLocationText = location
+		end
+		return runtime.sessionLocationText
+	end
+	return runtime.sessionLocationText
+end
+
+local function CaptureLoadingStartLocation()
+	local location = runtime.sessionLocationText
+	if not IsValidName(location) and not HasRuntimeSessionKills() then
+		location = GetCurrentLocationText()
+	end
+	if IsValidName(location) then
+		runtime.loadingStartLocationText = location
+	end
+	return runtime.loadingStartLocationText
+end
+
+local function GetHistorySessionLocation()
+	if IsValidName(runtime.loadingStartLocationText) then
+		return runtime.loadingStartLocationText
+	end
+	if IsValidName(runtime.sessionLocationText) then
+		return runtime.sessionLocationText
+	end
+	if runtime.gameLoadingStarted then
+		return nil
+	end
+	local location = GetCurrentLocationText()
+	if location ~= "" then
+		return location
+	end
+	return nil
+end
+
+local function GetCurrentDateText()
+	if os == nil or type(os.date) ~= "function" then
+		return nil
+	end
+
+	local ok, dateParts = pcall(os.date, "*t")
+	if ok and type(dateParts) == "table" then
+		local month = tonumber(dateParts.month)
+		local day = tonumber(dateParts.day)
+		local year = tonumber(dateParts.year)
+		if month ~= nil and day ~= nil and year ~= nil then
+			return tostring(month) .. "/" .. tostring(day) .. "/" .. tostring(year)
+		end
+	end
+
+	ok, dateParts = pcall(os.date, "%m/%d/%Y")
+	if ok and type(dateParts) == "string" then
+		local month, day, year = string.match(dateParts, "^(%d+)/(%d+)/(%d+)$")
+		month = tonumber(month)
+		day = tonumber(day)
+		year = tonumber(year)
+		if month ~= nil and day ~= nil and year ~= nil then
+			return tostring(month) .. "/" .. tostring(day) .. "/" .. tostring(year)
+		end
+	end
+
+	return nil
 end
 
 local function SaveData(key, value)
@@ -447,7 +741,7 @@ local function LoadSessionHistory()
 				if name == "" then
 					name = "S" .. tostring(#runtime.historySessions + 1)
 				end
-				local sessionIndex = tonumber(string.match(name, "^S(%d+)$"))
+				local sessionIndex = tonumber(string.match(name, "^S(%d+)"))
 				if sessionIndex ~= nil and sessionIndex > maxIndex then
 					maxIndex = sessionIndex
 				end
@@ -466,6 +760,8 @@ local function LoadSessionHistory()
 
 				runtime.historySessions[#runtime.historySessions + 1] = {
 					name = name,
+					location = tostring(session.location or ""),
+					date = tostring(session.date or ""),
 					summary = tostring(session.summary or ""),
 					createdAt = tonumber(session.createdAt) or 0,
 					lines = normalizedLines,
@@ -1497,6 +1793,9 @@ function Analysis.ClearSessionStats()
 	runtime.combatActive = false
 	runtime.combatStart = nil
 	runtime.lastCombatActivity = nil
+	runtime.sessionLocationText = nil
+	runtime.loadingStartLocationText = nil
+	runtime.locationRefreshElapsed = 0
 	runtime.lastBagSnapshot = nil
 	runtime.pendingBagSyncUntil = nil
 	runtime.localPlayerName = nil
@@ -1523,6 +1822,7 @@ local function CountKill(mobName, killerName)
 		killerName = Trim(killerName)
 	end
 
+	CaptureSessionActivityLocation()
 	runtime.killCounts[mobName] = (tonumber(runtime.killCounts[mobName]) or 0) + 1
 	runtime.sessionKillCounts[mobName] = (tonumber(runtime.sessionKillCounts[mobName]) or 0) + 1
 	if runtime.killerCounts[mobName] == nil then
@@ -3134,10 +3434,8 @@ function Analysis.AppendCombatReviewLines(lines)
 	if totalDamage > 0 then
 		Analysis.AddViewLine(
 			lines,
-			"metric",
-			"  Damage "
-				.. Analysis.FormatDamage(totalDamage)
-				.. " | DPS "
+			"damage",
+			"  DPS "
 				.. Analysis.FormatDps(Analysis.GetPlayerDps(totalDamage))
 				.. " | Hits "
 				.. tostring(hits)
@@ -3260,12 +3558,19 @@ end
 Analysis.VIEW_LINE_COLORS = {
 	header = { 0.95, 0.92, 0.82, 1 },
 	metric = { 0.82, 0.88, 0.96, 1 },
+	mana = { 0.36, 0.62, 1.0, 1 },
+	session_kills = { 1.0, 0.58, 0.20, 1 },
+	damage = { 1.0, 0.78, 0.22, 1 },
+	exp = { 1.0, 0.55, 0.82, 1 },
+	items = { 0.78, 0.80, 0.84, 1 },
+	time = { 0.72, 0.52, 1.0, 1 },
+	damage_taken = { 1.0, 0.30, 0.28, 1 },
 	category = { 0.85, 0.78, 0.65, 1 },
 	skill = { 1, 1, 1, 1 },
 	heal = { 0.55, 0.95, 0.75, 1 },
 	target = { 0.92, 0.92, 0.92, 1 },
 	unit = { 1, 1, 1, 1 },
-	drop = { 0.92, 0.86, 0.62, 1 },
+	drop = { 0.78, 0.80, 0.84, 1 },
 	warning = { 1, 0.52, 0.48, 1 },
 	spacer = { 0.5, 0.5, 0.5, 0 },
 }
@@ -3327,28 +3632,13 @@ function Analysis.BuildViewDisplayLines()
 	end
 
 	Analysis.AddViewLine(lines, "header", "Session Totals")
-	Analysis.AddViewLine(
-		lines,
-		"metric",
-		"  Kills "
-			.. Analysis.FormatAmount(sessionKills)
-			.. " | Time "
-			.. Analysis.FormatDuration(totalKillTime)
-			.. " | Mana "
-			.. Analysis.FormatAmount(totalManaSpent)
-			.. " | EXP "
-			.. Analysis.FormatAmount(totalExpGained)
-	)
-	Analysis.AddViewLine(
-		lines,
-		"metric",
-		"  Damage dealt "
-			.. Analysis.FormatAmount(totalDamageDealt)
-			.. " | Damage taken "
-			.. Analysis.FormatAmount(totalDamageTaken)
-			.. " | Items "
-			.. Analysis.FormatAmount(totalDroppedItems)
-	)
+	Analysis.AddViewLine(lines, "session_kills", "  Session Kills " .. Analysis.FormatAmount(sessionKills))
+	Analysis.AddViewLine(lines, "time", "  Time " .. Analysis.FormatDuration(totalKillTime))
+	Analysis.AddViewLine(lines, "mana", "  Mana " .. Analysis.FormatAmount(totalManaSpent))
+	Analysis.AddViewLine(lines, "exp", "  EXP " .. Analysis.FormatAmount(totalExpGained))
+	Analysis.AddViewLine(lines, "damage", "  Damage " .. Analysis.FormatAmount(totalDamageDealt))
+	Analysis.AddViewLine(lines, "damage_taken", "  Damage Taken " .. Analysis.FormatAmount(totalDamageTaken))
+	Analysis.AddViewLine(lines, "items", "  Items " .. Analysis.FormatAmount(totalDroppedItems))
 	Analysis.AppendCombatReviewLines(lines)
 	Analysis.AddViewLine(lines, "spacer", "")
 	Analysis.AddViewLine(lines, "header", "Units")
@@ -3381,8 +3671,7 @@ end
 function Analysis.HasCurrentSessionData()
 	local stats = Analysis.EnsurePlayerCombatStats()
 	local energizeKeys = Analysis.BuildSortedEntryKeys(runtime.energizeBySkill, "amount")
-	return GetTotalKillCount() > 0
-		or Analysis.GetSessionKillTotal() > 0
+	return Analysis.GetSessionKillTotal() > 0
 		or (tonumber(runtime.totalDamageDealt) or 0) > 0
 		or (tonumber(runtime.totalDamageTaken) or 0) > 0
 		or Analysis.GetPlayerDamageTotal() > 0
@@ -3395,13 +3684,15 @@ function Analysis.HasCurrentSessionData()
 		or (tonumber(runtime.totalManaSpent) or 0) > 0
 end
 
+function Analysis.HasSessionKills()
+	return Analysis.GetSessionKillTotal() > 0
+end
+
 local function BuildCurrentSessionSummary()
-	return "Kills "
-		.. Analysis.FormatAmount(GetTotalKillCount())
-		.. " | Session kills "
+	return "Session Kills "
 		.. Analysis.FormatAmount(Analysis.GetSessionKillTotal())
 		.. " | Damage "
-		.. Analysis.FormatAmount(Analysis.GetPlayerDamageTotal())
+		.. Analysis.FormatAmount(runtime.totalDamageDealt)
 		.. " | EXP "
 		.. Analysis.FormatAmount(runtime.totalExpGained)
 end
@@ -3423,7 +3714,7 @@ local function CopyViewLines(lines)
 end
 
 SaveCurrentSessionToHistory = function()
-	if not Analysis.HasCurrentSessionData() then
+	if not Analysis.HasSessionKills() then
 		return false
 	end
 
@@ -3437,9 +3728,19 @@ SaveCurrentSessionToHistory = function()
 	end
 
 	local sessionName = "S" .. tostring(runtime.nextHistorySessionIndex)
+	local sessionLocation = GetHistorySessionLocation()
+	if IsValidName(sessionLocation) then
+		sessionName = sessionName .. " " .. sessionLocation
+	end
+	local sessionDate = GetCurrentDateText()
+	if IsValidName(sessionDate) then
+		sessionName = sessionName .. " " .. sessionDate
+	end
 	runtime.nextHistorySessionIndex = runtime.nextHistorySessionIndex + 1
 	runtime.historySessions[#runtime.historySessions + 1] = {
 		name = sessionName,
+		location = sessionLocation or "",
+		date = sessionDate or "",
 		summary = BuildCurrentSessionSummary(),
 		createdAt = RefreshClock(),
 		lines = CopyViewLines(lines),
@@ -3638,15 +3939,11 @@ UpdateViewWindow = function()
 	runtime.viewTitleLabel:SetText("Kill Session Analysis")
 	runtime.viewTitleLabel:SetExtent(VIEW_WINDOW_WIDTH - (PADDING * 2) - 36, 24)
 	local playerName = GetLocalPlayerName() or "You"
-	local summaryText = playerName
-		.. " | Kills "
-		.. Analysis.FormatAmount(Analysis.GetSessionKillTotal())
-		.. " | Time "
-		.. Analysis.FormatDuration(Analysis.GetKillCombatDuration(RefreshClock()))
-		.. " | Mana "
-		.. Analysis.FormatAmount(runtime.totalManaSpent)
-		.. " | EXP "
-		.. Analysis.FormatAmount(runtime.totalExpGained)
+	local summaryText = playerName .. " current session"
+	local location = CaptureCurrentSessionLocation()
+	if IsValidName(location) then
+		summaryText = summaryText .. " | " .. location
+	end
 	runtime.viewSummaryLabel:SetText(Analysis.TruncateText(summaryText, 120))
 
 	local lines = Analysis.BuildViewDisplayLines()
@@ -3759,6 +4056,7 @@ function eventWindow:OnEvent(event, ...)
 	end
 	RefreshClock()
 	if event == "ENTERED_LOADING" then
+		CaptureLoadingStartLocation()
 		runtime.gameLoadingStarted = true
 		return
 	end
@@ -3768,14 +4066,20 @@ function eventWindow:OnEvent(event, ...)
 			ClearKillCounts()
 		end
 		runtime.gameLoadingStarted = false
+		CaptureCurrentSessionLocation()
 		return
 	end
+	if not runtime.gameLoadingStarted then
+		CaptureCurrentSessionLocation()
+	end
 	if event == "COMBAT_MSG" then
+		CaptureSessionActivityLocation()
 		UpdateCurrentTarget(true)
 		HandleCombatMessage(...)
 		return
 	end
 	if event == "ITEM_ACQUISITION_BY_LOOT" then
+		CaptureSessionActivityLocation()
 		Analysis.HandleLootAcquisitionEvent(...)
 		return
 	end
@@ -3789,6 +4093,7 @@ function eventWindow:OnEvent(event, ...)
 		return
 	end
 	if event == "EXP_CHANGED" then
+		CaptureSessionActivityLocation()
 		Analysis.HandleExpChangedEvent(...)
 		return
 	end
@@ -3802,6 +4107,9 @@ function eventWindow:OnEvent(event, ...)
 		runtime.currentTargetKey = nil
 		runtime.currentTargetName = nil
 		runtime.currentTargetDeathCounted = false
+	end
+	if event == "ENTERED_WORLD" or event == "UPDATE_ZONE_LEVEL_INFO" then
+		return
 	end
 	UpdateCurrentTarget()
 end
@@ -3819,6 +4127,8 @@ eventWindow:RegisterEvent("TARGET_TO_TARGET_CHANGED")
 eventWindow:RegisterEvent("AGGRO_METER_CLEARED")
 eventWindow:RegisterEvent("ENTERED_LOADING")
 eventWindow:RegisterEvent("LEFT_LOADING")
+eventWindow:RegisterEvent("ENTERED_WORLD")
+eventWindow:RegisterEvent("UPDATE_ZONE_LEVEL_INFO")
 
 function eventWindow:OnUpdate(dt)
 	if not runtime.active then
@@ -3835,7 +4145,15 @@ function eventWindow:OnUpdate(dt)
 	if runtime.updateElapsed < 0.15 then
 		return
 	end
+	local locationTickElapsed = runtime.updateElapsed
 	runtime.updateElapsed = 0
+	if not runtime.gameLoadingStarted then
+		runtime.locationRefreshElapsed = (tonumber(runtime.locationRefreshElapsed) or 0) + locationTickElapsed
+		if runtime.locationRefreshElapsed >= 0.5 then
+			runtime.locationRefreshElapsed = 0
+			CaptureCurrentSessionLocation()
+		end
+	end
 	Analysis.SyncSessionResourceSnapshots()
 	if runtime.pendingBagSyncUntil ~= nil then
 		Analysis.SyncBagDrops(false)
