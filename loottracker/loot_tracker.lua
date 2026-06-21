@@ -114,9 +114,13 @@ local CONFIG = {
 	TRACKER_ROW_TOP_GAP = 3,
 	ACQUISITION_GLOW_SECONDS = 40.0,
 	ACQUISITION_GLOW_BATCH_SECONDS = 2.0,
-	ACQUISITION_GLOW_MAX_ALPHA = 0.58,
-	ACQUISITION_GLOW_BORDER_SIZE = 2,
-	ACQUISITION_GLOW_COLOR = { 0.42, 1.0, 0.48 },
+	ACQUISITION_GLOW_MAX_ALPHA = 0.8,
+	ACQUISITION_GLOW_BORDER_SIZE = 3,
+	ACQUISITION_GLOW_COLOR = { 1.0, 0.41, 0.71 },
+	ACQUISITION_GLOW_INNER_COLOR = { 0.72, 0.48, 0.95 },
+	ACQUISITION_GLOW_INNER_GRADIENT_STEPS = 4,
+	ACQUISITION_GLOW_INNER_STEP_SIZE = 2.35,
+	ACQUISITION_GLOW_INNER_MAX_ALPHA = 0.5,
 
 	PICKER_WIDTH = 330,
 	PICKER_HEIGHT = 328,
@@ -933,6 +937,174 @@ local function SetRowHover(row, isHovered)
 	-- Sets text, compact name, count, icon and background state on a row widget.
 end
 
+local function SetAcquisitionGlowDrawableAlpha(drawable, color, alpha)
+	if drawable == nil or color == nil then
+		return
+	end
+
+	drawable:SetColor(color[1], color[2], color[3], alpha)
+	if alpha > 0 then
+		if not SafeMethod(drawable, "SetVisible", true) then
+			SafeMethod(drawable, "Show", true)
+		end
+		SafeMethod(drawable, "Raise")
+	else
+		if not SafeMethod(drawable, "SetVisible", false) then
+			SafeMethod(drawable, "Show", false)
+		end
+	end
+end
+
+-- Positions the hot-pink border strips so side pieces skip the corners and avoid overlap brightening.
+function runtime:LayoutAcquisitionGlowBorder(row, boxSize)
+	if row == nil or row.acquisitionGlowBorder == nil then
+		return
+	end
+
+	local glowBorderSize = runtime:Scale(CONFIG.ACQUISITION_GLOW_BORDER_SIZE)
+	if glowBorderSize < 1 then
+		glowBorderSize = 1
+	end
+
+	local verticalSpan = boxSize - (glowBorderSize * 2)
+	if verticalSpan < 0 then
+		verticalSpan = 0
+	end
+
+	local border = row.acquisitionGlowBorder
+	if border[1] ~= nil then
+		border[1]:RemoveAllAnchors()
+		border[1]:AddAnchor("TOPLEFT", row, 0, 0)
+		border[1]:SetExtent(boxSize, glowBorderSize)
+	end
+	if border[2] ~= nil then
+		border[2]:RemoveAllAnchors()
+		border[2]:AddAnchor("BOTTOMLEFT", row, 0, 0)
+		border[2]:SetExtent(boxSize, glowBorderSize)
+	end
+	if border[3] ~= nil then
+		border[3]:RemoveAllAnchors()
+		border[3]:AddAnchor("TOPLEFT", row, 0, glowBorderSize)
+		border[3]:SetExtent(glowBorderSize, verticalSpan)
+	end
+	if border[4] ~= nil then
+		border[4]:RemoveAllAnchors()
+		border[4]:AddAnchor("TOPRIGHT", row, 0, glowBorderSize)
+		border[4]:SetExtent(glowBorderSize, verticalSpan)
+	end
+end
+
+-- Builds inset ring drawables that simulate a light-pink gradient inside the hot-pink border.
+function runtime:CreateAcquisitionGlowInnerGradient(row)
+	if row == nil then
+		return
+	end
+
+	local boxSize = runtime:Scale(CONFIG.BOX_SIZE)
+	local borderSize = runtime:Scale(CONFIG.ACQUISITION_GLOW_BORDER_SIZE)
+	if borderSize < 1 then
+		borderSize = 1
+	end
+	local stepSize = runtime:Scale(CONFIG.ACQUISITION_GLOW_INNER_STEP_SIZE)
+	if stepSize < 1 then
+		stepSize = 1
+	end
+
+	local color = CONFIG.ACQUISITION_GLOW_INNER_COLOR
+	row.acquisitionGlowInner = {}
+
+	for ringIndex = 1, CONFIG.ACQUISITION_GLOW_INNER_GRADIENT_STEPS do
+		local inset = borderSize + ((ringIndex - 1) * stepSize)
+		local innerWidth = boxSize - (inset * 2)
+		local innerHeight = boxSize - (inset * 2)
+		if innerWidth < 0 then
+			innerWidth = 0
+		end
+		if innerHeight < 0 then
+			innerHeight = 0
+		end
+		local verticalSpan = innerHeight - (stepSize * 2)
+		if verticalSpan < 0 then
+			verticalSpan = 0
+		end
+
+		local top = row:CreateColorDrawable(color[1], color[2], color[3], 0, "overlay")
+		top:AddAnchor("TOPLEFT", row, inset, inset)
+		top:SetExtent(innerWidth, stepSize)
+
+		local bottom = row:CreateColorDrawable(color[1], color[2], color[3], 0, "overlay")
+		bottom:AddAnchor("BOTTOMLEFT", row, inset, -inset)
+		bottom:SetExtent(innerWidth, stepSize)
+
+		local left = row:CreateColorDrawable(color[1], color[2], color[3], 0, "overlay")
+		left:AddAnchor("TOPLEFT", row, inset, inset + stepSize)
+		left:SetExtent(stepSize, verticalSpan)
+
+		local right = row:CreateColorDrawable(color[1], color[2], color[3], 0, "overlay")
+		right:AddAnchor("TOPRIGHT", row, -inset, inset + stepSize)
+		right:SetExtent(stepSize, verticalSpan)
+
+		row.acquisitionGlowInner[ringIndex] = {
+			top,
+			bottom,
+			left,
+			right,
+		}
+	end
+end
+
+function runtime:ResizeAcquisitionGlowInner(row, boxSize)
+	if row == nil or row.acquisitionGlowInner == nil then
+		return
+	end
+
+	local borderSize = runtime:Scale(CONFIG.ACQUISITION_GLOW_BORDER_SIZE)
+	if borderSize < 1 then
+		borderSize = 1
+	end
+	local stepSize = runtime:Scale(CONFIG.ACQUISITION_GLOW_INNER_STEP_SIZE)
+	if stepSize < 1 then
+		stepSize = 1
+	end
+
+	for ringIndex, ring in ipairs(row.acquisitionGlowInner) do
+		local inset = borderSize + ((ringIndex - 1) * stepSize)
+		local innerWidth = boxSize - (inset * 2)
+		local innerHeight = boxSize - (inset * 2)
+		if innerWidth < 0 then
+			innerWidth = 0
+		end
+		if innerHeight < 0 then
+			innerHeight = 0
+		end
+		local verticalSpan = innerHeight - (stepSize * 2)
+		if verticalSpan < 0 then
+			verticalSpan = 0
+		end
+
+		if ring[1] ~= nil then
+			ring[1]:RemoveAllAnchors()
+			ring[1]:AddAnchor("TOPLEFT", row, inset, inset)
+			ring[1]:SetExtent(innerWidth, stepSize)
+		end
+		if ring[2] ~= nil then
+			ring[2]:RemoveAllAnchors()
+			ring[2]:AddAnchor("BOTTOMLEFT", row, inset, -inset)
+			ring[2]:SetExtent(innerWidth, stepSize)
+		end
+		if ring[3] ~= nil then
+			ring[3]:RemoveAllAnchors()
+			ring[3]:AddAnchor("TOPLEFT", row, inset, inset + stepSize)
+			ring[3]:SetExtent(stepSize, verticalSpan)
+		end
+		if ring[4] ~= nil then
+			ring[4]:RemoveAllAnchors()
+			ring[4]:AddAnchor("TOPRIGHT", row, -inset, inset + stepSize)
+			ring[4]:SetExtent(stepSize, verticalSpan)
+		end
+	end
+end
+
 function runtime:SetRowAcquisitionGlowAlpha(row, alpha)
 	if row == nil or row.acquisitionGlowBorder == nil then
 		return
@@ -945,23 +1117,20 @@ function runtime:SetRowAcquisitionGlowAlpha(row, alpha)
 		boundedAlpha = CONFIG.ACQUISITION_GLOW_MAX_ALPHA
 	end
 
-	for _, border in ipairs(row.acquisitionGlowBorder) do
-		border:SetColor(
-			CONFIG.ACQUISITION_GLOW_COLOR[1],
-			CONFIG.ACQUISITION_GLOW_COLOR[2],
-			CONFIG.ACQUISITION_GLOW_COLOR[3],
-			boundedAlpha
-		)
-		if boundedAlpha > 0 then
-			if not SafeMethod(border, "SetVisible", true) then
-				SafeMethod(border, "Show", true)
-			end
-			SafeMethod(border, "Raise")
-		else
-			if not SafeMethod(border, "SetVisible", false) then
-				SafeMethod(border, "Show", false)
+	if row.acquisitionGlowInner ~= nil then
+		local innerAlphaScale = CONFIG.ACQUISITION_GLOW_INNER_MAX_ALPHA / CONFIG.ACQUISITION_GLOW_MAX_ALPHA
+		for ringIndex, ring in ipairs(row.acquisitionGlowInner) do
+			local fade = (CONFIG.ACQUISITION_GLOW_INNER_GRADIENT_STEPS - ringIndex + 1)
+				/ CONFIG.ACQUISITION_GLOW_INNER_GRADIENT_STEPS
+			local ringAlpha = boundedAlpha * innerAlphaScale * fade
+			for _, drawable in ipairs(ring) do
+				SetAcquisitionGlowDrawableAlpha(drawable, CONFIG.ACQUISITION_GLOW_INNER_COLOR, ringAlpha)
 			end
 		end
+	end
+
+	for _, border in ipairs(row.acquisitionGlowBorder) do
+		SetAcquisitionGlowDrawableAlpha(border, CONFIG.ACQUISITION_GLOW_COLOR, boundedAlpha)
 	end
 end
 
@@ -2100,22 +2269,8 @@ local function AnchorTrackedRows()
 				end
 			end
 			if row.acquisitionGlowBorder ~= nil then
-				local glowBorderSize = runtime:Scale(CONFIG.ACQUISITION_GLOW_BORDER_SIZE)
-				if glowBorderSize < 1 then
-					glowBorderSize = 1
-				end
-				if row.acquisitionGlowBorder[1] ~= nil then
-					row.acquisitionGlowBorder[1]:SetExtent(boxSize, glowBorderSize)
-				end
-				if row.acquisitionGlowBorder[2] ~= nil then
-					row.acquisitionGlowBorder[2]:SetExtent(boxSize, glowBorderSize)
-				end
-				if row.acquisitionGlowBorder[3] ~= nil then
-					row.acquisitionGlowBorder[3]:SetExtent(glowBorderSize, boxSize)
-				end
-				if row.acquisitionGlowBorder[4] ~= nil then
-					row.acquisitionGlowBorder[4]:SetExtent(glowBorderSize, boxSize)
-				end
+				runtime:LayoutAcquisitionGlowBorder(row, boxSize)
+				runtime:ResizeAcquisitionGlowInner(row, boxSize)
 			end
 			if row.nameLabel ~= nil then
 				row.nameLabel:SetExtent(boxSize - runtime:Scale(5), runtime:Scale(18))
@@ -2213,11 +2368,6 @@ function runtime:CreateTrackerRow(index)
 	HideIconDrawable(rowIcon)
 	row.iconDrawable = rowIcon
 
-	local glowBorderSize = runtime:Scale(CONFIG.ACQUISITION_GLOW_BORDER_SIZE)
-	if glowBorderSize < 1 then
-		glowBorderSize = 1
-	end
-
 	local glowTop = row:CreateColorDrawable(
 		CONFIG.ACQUISITION_GLOW_COLOR[1],
 		CONFIG.ACQUISITION_GLOW_COLOR[2],
@@ -2225,9 +2375,6 @@ function runtime:CreateTrackerRow(index)
 		0,
 		"artwork"
 	)
-	glowTop:AddAnchor("TOPLEFT", row, 0, 0)
-	glowTop:SetExtent(runtime:Scale(CONFIG.BOX_SIZE), glowBorderSize)
-
 	local glowBottom = row:CreateColorDrawable(
 		CONFIG.ACQUISITION_GLOW_COLOR[1],
 		CONFIG.ACQUISITION_GLOW_COLOR[2],
@@ -2235,8 +2382,6 @@ function runtime:CreateTrackerRow(index)
 		0,
 		"artwork"
 	)
-	glowBottom:AddAnchor("BOTTOMLEFT", row, 0, 0)
-	glowBottom:SetExtent(runtime:Scale(CONFIG.BOX_SIZE), glowBorderSize)
 
 	local glowLeft = row:CreateColorDrawable(
 		CONFIG.ACQUISITION_GLOW_COLOR[1],
@@ -2245,8 +2390,6 @@ function runtime:CreateTrackerRow(index)
 		0,
 		"artwork"
 	)
-	glowLeft:AddAnchor("TOPLEFT", row, 0, 0)
-	glowLeft:SetExtent(glowBorderSize, runtime:Scale(CONFIG.BOX_SIZE))
 
 	local glowRight = row:CreateColorDrawable(
 		CONFIG.ACQUISITION_GLOW_COLOR[1],
@@ -2255,8 +2398,6 @@ function runtime:CreateTrackerRow(index)
 		0,
 		"artwork"
 	)
-	glowRight:AddAnchor("TOPRIGHT", row, 0, 0)
-	glowRight:SetExtent(glowBorderSize, runtime:Scale(CONFIG.BOX_SIZE))
 
 	row.acquisitionGlowBorder = {
 		glowTop,
@@ -2264,6 +2405,8 @@ function runtime:CreateTrackerRow(index)
 		glowLeft,
 		glowRight,
 	}
+	runtime:LayoutAcquisitionGlowBorder(row, runtime:Scale(CONFIG.BOX_SIZE))
+	runtime:CreateAcquisitionGlowInnerGradient(row)
 	runtime:ClearRowAcquisitionGlow(row)
 
 	local nameLabel = row:CreateChildWidget("label", "lootTrackerRowName" .. tostring(index), 0, true)
