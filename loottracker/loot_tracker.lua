@@ -175,6 +175,11 @@ local trackerLayout = CONFIG.LAYOUT_HORIZONTAL
 local restoreButtonPositionSaved = false
 local pickerWindowPositionSaved = false
 local trackerHeaderControlsVisible = true
+local trackerSlotRightDrag = {
+	sourceIndex = nil,
+	hoverIndex = nil,
+}
+local suppressRowRightClickUntil = 0
 local UpdatePicker
 local RecreatePickerSearchBox
 local ApplyTrackerLayout
@@ -191,6 +196,11 @@ local function SafeMethod(target, methodName, ...)
 		return false
 	end
 	return pcall(fn, target, ...)
+end
+
+local function IsRightMouseButton(mouseButton)
+	local buttonText = tostring(mouseButton or "")
+	return buttonText == "RightButton" or buttonText == "right" or buttonText == "RIGHT" or buttonText == "2"
 end
 
 local function NormalizeDt(dt)
@@ -1309,32 +1319,174 @@ local function SetRowText(row, nameText, countText, state, iconPath)
 	if row.lastState ~= state then
 		SetRowBackground(row, state)
 		row.lastState = state
-	-- Removes the tracked item at the given index, saves, and requests refresh.
 	end
 end
 
+-- Removes the tracked item at the given index, saves, and requests refresh.
 local function RemoveTrackedItem(index)
 	if trackedItems[index] == nil then
 		return
 	end
 	trackedItems[index] = nil
-	-- Sets the tracked item at index to the provided item data, saves, and requests refresh.
 	SaveTrackedItems()
 	refreshRequested = true
 end
 
+-- Copies picker and saved-set item data into the compact tracked-item shape.
+local function CopyTrackedItemData(item)
+	if type(item) ~= "table" or item.name == nil then
+		return nil
+	end
+
+	local itemName = tostring(item.name)
+	local itemGrade = item.grade
+	local itemIconPath = item.iconPath
+	return {
+		key = item.key or BuildItemKey(itemName, itemGrade, itemIconPath) or NormalizeName(itemName),
+		name = itemName,
+		grade = itemGrade,
+		iconPath = itemIconPath,
+	}
+end
+
+local function TrackedItemsMatch(left, right)
+	-- Saved data may have older name-only keys, so compare exact keys first and then use compatible item fields.
+	if type(left) ~= "table" or type(right) ~= "table" or left.name == nil or right.name == nil then
+		return false
+	end
+
+	local leftKey = left.key or BuildItemKey(left.name, left.grade, left.iconPath) or NormalizeName(left.name)
+	local rightKey = right.key or BuildItemKey(right.name, right.grade, right.iconPath) or NormalizeName(right.name)
+	if leftKey ~= nil and leftKey ~= "" and leftKey == rightKey then
+		return true
+	end
+
+	local leftName = NormalizeName(left.name)
+	local rightName = NormalizeName(right.name)
+	if leftName == "" or leftName ~= rightName then
+		return false
+	end
+
+	local gradeMatches = left.grade == nil or right.grade == nil or left.grade == right.grade
+	local iconMatches = left.iconPath == nil or right.iconPath == nil or left.iconPath == right.iconPath
+	return gradeMatches and iconMatches
+end
+
+local function FindTrackedItemIndex(item, ignoredIndex)
+	for index = 1, TRACKED_SLOT_COUNT do
+		if index ~= ignoredIndex and TrackedItemsMatch(trackedItems[index], item) then
+			return index
+		end
+	end
+	return nil
+end
+
+-- Sets a tracked item and swaps with an existing matching tracked slot instead of duplicating it.
 local function SetTrackedItem(index, item)
 	if index == nil or item == nil then
 		return
 	end
-	trackedItems[index] = {
-		key = item.key,
-		name = item.name,
-		grade = item.grade,
-		iconPath = item.iconPath,
-	}
+
+	local nextItem = CopyTrackedItemData(item)
+	if nextItem == nil then
+		return
+	end
+
+	local existingIndex = FindTrackedItemIndex(nextItem, index)
+	if existingIndex ~= nil then
+		trackedItems[existingIndex] = CopyTrackedItemData(trackedItems[index])
+	end
+	trackedItems[index] = nextItem
 	SaveTrackedItems()
 	refreshRequested = true
+end
+
+local function ClearTrackerSlotRightDrag()
+	trackerSlotRightDrag.sourceIndex = nil
+	trackerSlotRightDrag.hoverIndex = nil
+end
+
+local function SetTrackerSlotRightDragHover(rowIndex)
+	if trackerSlotRightDrag.sourceIndex ~= nil then
+		trackerSlotRightDrag.hoverIndex = rowIndex
+	end
+end
+
+local function ClearTrackerSlotRightDragHover(rowIndex)
+	if trackerSlotRightDrag.hoverIndex == rowIndex then
+		trackerSlotRightDrag.hoverIndex = nil
+	end
+end
+
+local function BeginTrackerSlotRightDrag(rowIndex, mouseButton)
+	if not IsRightMouseButton(mouseButton) or trackedItems[rowIndex] == nil then
+		return false
+	end
+
+	trackerSlotRightDrag.sourceIndex = rowIndex
+	trackerSlotRightDrag.hoverIndex = rowIndex
+	return true
+end
+
+local function FindMouseOverTrackedRowIndex()
+	for index = 1, TRACKED_SLOT_COUNT do
+		local row = rowWidgets[index]
+		local ok, isMouseOver = SafeMethod(row, "IsMouseOver")
+		if ok and isMouseOver then
+			return index
+		end
+	end
+	return nil
+end
+
+local function SwapTrackedItemSlots(sourceIndex, targetIndex)
+	-- Copies both sides before assignment so dropping onto an empty slot moves the item without aliasing tables.
+	if sourceIndex == nil or targetIndex == nil or sourceIndex == targetIndex then
+		return false
+	end
+
+	local sourceItem = CopyTrackedItemData(trackedItems[sourceIndex])
+	if sourceItem == nil then
+		return false
+	end
+
+	trackedItems[sourceIndex] = CopyTrackedItemData(trackedItems[targetIndex])
+	trackedItems[targetIndex] = sourceItem
+	SaveTrackedItems()
+	refreshRequested = true
+	return true
+end
+
+local function EndTrackerSlotRightDrag(rowIndex, mouseButton)
+	-- Drop uses the row under the cursor first because drag-stop may fire on the source row after release.
+	if mouseButton ~= nil and not IsRightMouseButton(mouseButton) then
+		return false
+	end
+	if trackerSlotRightDrag.sourceIndex == nil then
+		return false
+	end
+
+	local sourceIndex = trackerSlotRightDrag.sourceIndex
+	local targetIndex = FindMouseOverTrackedRowIndex() or trackerSlotRightDrag.hoverIndex or rowIndex
+	ClearTrackerSlotRightDrag()
+
+	if SwapTrackedItemSlots(sourceIndex, targetIndex) then
+		suppressRowRightClickUntil = CurrentClock() + 0.6
+		return true
+	end
+	return false
+end
+
+local function ShouldSuppressRowRightClick()
+	if suppressRowRightClickUntil <= 0 then
+		return false
+	end
+	if CurrentClock() <= suppressRowRightClickUntil then
+		suppressRowRightClickUntil = 0
+		return true
+	end
+	suppressRowRightClickUntil = 0
+	return false
 end
 
 local UpdateRows
@@ -1486,7 +1638,11 @@ local function ClosePicker()
 end
 
 local function HandleRowClick(rowIndex, mouseButton)
-	if mouseButton == "RightButton" then
+	if IsRightMouseButton(mouseButton) then
+		ClearTrackerSlotRightDrag()
+		if ShouldSuppressRowRightClick() then
+			return
+		end
 		RemoveTrackedItem(rowIndex)
 		UpdateRows()
 	else
@@ -2435,18 +2591,24 @@ function runtime:CreateTrackerRow(index)
 	function row:OnEnter()
 		-- Sets hover state to true for the row on mouse enter.
 		ShowTrackerHeaderControls()
+		SetTrackerSlotRightDragHover(self.index)
 		SetRowHover(self, true)
 	end
 	row:SetHandler("OnEnter", row.OnEnter)
 
 		-- Sets hover state to false for the row on mouse leave.
 	function row:OnLeave()
+		ClearTrackerSlotRightDragHover(self.index)
 		SetRowHover(self, false)
 	end
 	row:SetHandler("OnLeave", row.OnLeave)
 		-- Handles click on a tracked row: right click removes item, left opens picker.
 
 	function row:OnClick(mouseButton)
+		if self.draggedTrackerSlot then
+			self.draggedTrackerSlot = false
+			return
+		end
 		if self.draggedTrackerWindow then
 			self.draggedTrackerWindow = false
 			return
@@ -2455,7 +2617,35 @@ function runtime:CreateTrackerRow(index)
 	end
 	row:SetHandler("OnClick", row.OnClick)
 
+	function row:OnMouseDown(mouseButton)
+		BeginTrackerSlotRightDrag(self.index, mouseButton)
+	end
+	row:SetHandler("OnMouseDown", row.OnMouseDown)
+
+	function row:OnMouseUp(mouseButton)
+		if EndTrackerSlotRightDrag(self.index, mouseButton) then
+			UpdateRows()
+		end
+	end
+	row:SetHandler("OnMouseUp", row.OnMouseUp)
+
+	function row:OnRightButtonDown()
+		BeginTrackerSlotRightDrag(self.index, "RightButton")
+	end
+	row:SetHandler("OnRightButtonDown", row.OnRightButtonDown)
+
+	function row:OnRightButtonUp()
+		if EndTrackerSlotRightDrag(self.index, "RightButton") then
+			UpdateRows()
+		end
+	end
+	row:SetHandler("OnRightButtonUp", row.OnRightButtonUp)
+
 	function row:OnDragStart()
+		if trackerSlotRightDrag.sourceIndex == self.index then
+			self.draggedTrackerSlot = true
+			return true
+		end
 		self.draggedTrackerWindow = true
 		trackerWindow:StartMoving()
 		return true
@@ -2463,6 +2653,13 @@ function runtime:CreateTrackerRow(index)
 	row:SetHandler("OnDragStart", row.OnDragStart)
 
 	function row:OnDragStop()
+		if self.draggedTrackerSlot then
+			self.draggedTrackerSlot = false
+			if EndTrackerSlotRightDrag(self.index, "RightButton") then
+				UpdateRows()
+			end
+			return
+		end
 		trackerWindow:StopMovingOrSizing()
 		SaveWindowPosition(trackerWindow)
 		if runtime.PositionResizeHandles ~= nil then
@@ -3283,19 +3480,7 @@ end
 AttachPickerSearchHandlers(pickerSearchBox)
 
 function runtime:CopyTrackedItem(item)
-	if type(item) ~= "table" or item.name == nil then
-		return nil
-	end
-
-	local itemName = tostring(item.name)
-	local itemGrade = item.grade
-	local itemIconPath = item.iconPath
-	return {
-		key = item.key or BuildItemKey(itemName, itemGrade, itemIconPath) or NormalizeName(itemName),
-		name = itemName,
-		grade = itemGrade,
-		iconPath = itemIconPath,
-	}
+	return CopyTrackedItemData(item)
 end
 
 function runtime:LoadTrackedItemSets()

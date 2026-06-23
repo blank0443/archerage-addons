@@ -13,6 +13,9 @@ ADDON:ImportAPI(API_TYPE.PLAYER.id)
 ADDON:ImportAPI(API_TYPE.BAG.id)
 ADDON:ImportAPI(API_TYPE.WORLD.id)
 ADDON:ImportAPI(API_TYPE.MAP.id)
+if API_TYPE.UTIL ~= nil then
+	ADDON:ImportAPI(API_TYPE.UTIL.id)
+end
 
 local SAVE_KEY = "lootKillCounterKills"
 local SETTINGS_SAVE_KEY = "lootKillCounterSettings"
@@ -29,6 +32,11 @@ local VIEW_WINDOW_HEIGHT = 560
 local VIEW_ROW_TOP = 76
 local VIEW_ROW_HEIGHT = 15
 local VIEW_CONTENT_ROW_COUNT = 31
+local VIEW_SEGMENT_CHAR_WIDTH = 7
+local MONEY_GOLD_COLOR = { 1.0, 0.82, 0.20, 1 }
+local MONEY_SILVER_COLOR = { 0.72, 0.78, 0.84, 1 }
+local MONEY_COPPER_COLOR = { 0.86, 0.48, 0.24, 1 }
+local MONEY_LABEL_COLOR = { 0.90, 0.86, 0.72, 1 }
 local BAG_KIND = 1
 local MAX_BAG_SLOTS = 150
 local PADDING = 10
@@ -50,6 +58,7 @@ local EXP_ATTRIBUTION_SECONDS = 8
 local COMBAT_IDLE_TIMEOUT = 6
 local PLAYER_COMBAT_EXIT_GRACE = 1.5
 local PENDING_CAPTURE_DEDUPE_SECONDS = 0.35
+local MONEY_EVENT_DEDUPE_SECONDS = 0.35
 local MAX_PENDING_HITS_PER_TARGET = 4
 local MAX_PENDING_HITS_TOTAL = 20
 local ZONE_GROUP_NAMES = {
@@ -287,9 +296,15 @@ local runtime = {
 	totalDamageTaken = 0,
 	totalDroppedItems = 0,
 	totalExpGained = 0,
+	totalGoldEarned = 0,
 	totalManaSpent = 0,
 	lastPlayerMana = nil,
 	lastExpSnapshot = nil,
+	lastMoneySnapshot = nil,
+	lastMoneyEarnedAmount = nil,
+	lastMoneyEarnedTime = nil,
+	lastMoneyEarnedSource = nil,
+	playerMoneyHandlerRegistered = false,
 	localPlayerName = nil,
 	combatActive = false,
 	combatStart = nil,
@@ -824,6 +839,7 @@ local function LoadKillCounts()
 	runtime.totalDamageTaken = tonumber(data.totalDamageTaken) or runtime.totalDamageTaken
 	runtime.totalDroppedItems = tonumber(data.totalDroppedItems) or runtime.totalDroppedItems
 	runtime.totalExpGained = tonumber(data.totalExpGained) or runtime.totalExpGained
+	runtime.totalGoldEarned = tonumber(data.totalGoldEarned) or runtime.totalGoldEarned
 	runtime.totalManaSpent = tonumber(data.totalManaSpent) or runtime.totalManaSpent
 	runtime.totalKillTime = tonumber(data.totalKillTime) or runtime.totalKillTime
 	if type(data.lastDamage) == "table" then
@@ -878,6 +894,7 @@ local function SaveKillCounts()
 		totalDamageTaken = runtime.totalDamageTaken,
 		totalDroppedItems = runtime.totalDroppedItems,
 		totalExpGained = runtime.totalExpGained,
+		totalGoldEarned = runtime.totalGoldEarned,
 		totalManaSpent = runtime.totalManaSpent,
 		totalKillTime = runtime.totalKillTime,
 		lastDamage = runtime.lastDamage,
@@ -996,6 +1013,31 @@ function Analysis.CopyKillLocations(points)
 	return copied
 end
 
+function Analysis.GetSavedSessionKillTotal(session)
+	if type(session) ~= "table" then
+		return 0
+	end
+	if type(session.killCounts) == "table" then
+		local total = 0
+		for _, count in pairs(session.killCounts) do
+			count = tonumber(count)
+			if count ~= nil and count > 0 then
+				total = total + math.floor(count)
+			end
+		end
+		if total > 0 then
+			return total
+		end
+	end
+	local summary = tostring(session.summary or "")
+	local summaryKills = tonumber(string.match(summary, "Session Kills%s+(%d+)"))
+	if summaryKills ~= nil and summaryKills > 0 then
+		return math.floor(summaryKills)
+	end
+	local locations = Analysis.CopyKillLocations(session.killLocations)
+	return #locations
+end
+
 function Analysis.ReadPositionValues(ok, coordinateSource, x, y, z)
 	if not ok then
 		return nil
@@ -1096,15 +1138,17 @@ local function LoadSessionHistory()
 					end
 				end
 
-				runtime.historySessions[#runtime.historySessions + 1] = {
-					name = name,
-					location = tostring(session.location or ""),
-					date = tostring(session.date or ""),
-					summary = tostring(session.summary or ""),
-					createdAt = tonumber(session.createdAt) or 0,
-					lines = normalizedLines,
-					killLocations = Analysis.CopyKillLocations(session.killLocations),
-				}
+				if Analysis.GetSavedSessionKillTotal(session) > 0 then
+					runtime.historySessions[#runtime.historySessions + 1] = {
+						name = name,
+						location = tostring(session.location or ""),
+						date = tostring(session.date or ""),
+						summary = tostring(session.summary or ""),
+						createdAt = tonumber(session.createdAt) or 0,
+						lines = normalizedLines,
+						killLocations = Analysis.CopyKillLocations(session.killLocations),
+					}
+				end
 			end
 		end
 	end
@@ -2571,6 +2615,412 @@ function Analysis.HandleLootAcquisitionEvent(...)
 	end
 end
 
+function Analysis.SplitMoneyCopper(copper)
+	copper = math.floor((tonumber(copper) or 0) + 0.5)
+	if copper < 0 then
+		copper = 0
+	end
+	local gold = math.floor(copper / 10000)
+	copper = copper - (gold * 10000)
+	local silver = math.floor(copper / 100)
+	copper = copper - (silver * 100)
+	return gold, silver, copper
+end
+
+function Analysis.FormatMoneyCopper(copper)
+	local gold, silver, copperPart = Analysis.SplitMoneyCopper(copper)
+	return "Gold " .. tostring(gold) .. "g " .. tostring(silver) .. "s " .. tostring(copperPart) .. "c"
+end
+
+function Analysis.BuildMoneyLineSegments(copper)
+	local gold, silver, copperPart = Analysis.SplitMoneyCopper(copper)
+	return {
+		{ text = "  Gold ", color = MONEY_LABEL_COLOR },
+		{ text = tostring(gold) .. "g ", color = MONEY_GOLD_COLOR },
+		{ text = tostring(silver) .. "s ", color = MONEY_SILVER_COLOR },
+		{ text = tostring(copperPart) .. "c", color = MONEY_COPPER_COLOR },
+	}
+end
+
+local function AddMoneyPatternMatches(text, pattern, multiplier)
+	local total = 0
+	local matched = false
+	for amountText in string.gmatch(text, pattern) do
+		local amount = tonumber(amountText)
+		if amount ~= nil then
+			total = total + (amount * multiplier)
+			matched = true
+		end
+	end
+	return total, matched
+end
+
+local function MinPositive(...)
+	local result = nil
+	for index = 1, select("#", ...) do
+		local rawValue = select(index, ...)
+		if rawValue ~= nil then
+			local value = tonumber(rawValue)
+			if value ~= nil and (result == nil or value < result) then
+				result = value
+			end
+		end
+	end
+	return result
+end
+
+-- Accept raw copper strings, "1g 2s 3c", and label-first text such as "Gold 1 Silver 2".
+function Analysis.ParseMoneyCopper(value)
+	if type(value) == "number" then
+		return math.floor(value + 0.5)
+	end
+
+	local text = Trim(value)
+	if text == "" then
+		return nil
+	end
+	text = string.gsub(text, ",", "")
+	local direct = tonumber(text)
+	if direct ~= nil then
+		return math.floor(direct + 0.5)
+	end
+
+	local lower = string.lower(text)
+	local total = 0
+	local matched = false
+	local hasShortUnits = string.find(lower, "[%d%.]+%s*[gsc]%f[%A]") ~= nil
+	if not hasShortUnits
+		and (string.find(lower, "gold", 1, true) ~= nil
+			or string.find(lower, "silver", 1, true) ~= nil
+			or string.find(lower, "copper", 1, true) ~= nil)
+	then
+		local firstCurrency = MinPositive(
+			string.find(lower, "gold", 1, true),
+			string.find(lower, "silver", 1, true),
+			string.find(lower, "copper", 1, true)
+		)
+		local firstNumber = string.find(lower, "%d")
+		local added, ok
+		if firstCurrency ~= nil and (firstNumber == nil or firstCurrency < firstNumber) then
+			added, ok = AddMoneyPatternMatches(lower, "gold%D*([%d%.]+)", 10000)
+			total = total + added
+			matched = matched or ok
+			added, ok = AddMoneyPatternMatches(lower, "silver%D*([%d%.]+)", 100)
+			total = total + added
+			matched = matched or ok
+			added, ok = AddMoneyPatternMatches(lower, "copper%D*([%d%.]+)", 1)
+			total = total + added
+			matched = matched or ok
+		else
+			added, ok = AddMoneyPatternMatches(lower, "([%d%.]+)%s*gold", 10000)
+			total = total + added
+			matched = matched or ok
+			added, ok = AddMoneyPatternMatches(lower, "([%d%.]+)%s*silver", 100)
+			total = total + added
+			matched = matched or ok
+			added, ok = AddMoneyPatternMatches(lower, "([%d%.]+)%s*copper", 1)
+			total = total + added
+			matched = matched or ok
+		end
+	end
+	if not matched then
+		for amountText, unitText in string.gmatch(lower, "([%d%.]+)%s*([gsc])%f[%A]") do
+			local amount = tonumber(amountText)
+			if amount ~= nil then
+				if unitText == "g" then
+					total = total + (amount * 10000)
+				elseif unitText == "s" then
+					total = total + (amount * 100)
+				else
+					total = total + amount
+				end
+				matched = true
+			end
+		end
+	end
+	if matched then
+		return math.floor(total + 0.5)
+	end
+	local digits = string.gsub(text, "[^%d]", "")
+	if digits ~= "" then
+		return tonumber(digits)
+	end
+	return nil
+end
+
+Analysis.MONEY_TOTAL_FIELDS = {
+	"money",
+	"moneyStr",
+	"money_str",
+	"moneyString",
+	"money_string",
+	"currency",
+	"currencyStr",
+	"currency_str",
+	"amount",
+	"value",
+	"copper",
+	"copperAmount",
+	"copper_amount",
+	"cooper",
+}
+
+Analysis.MONEY_GOLD_FIELDS = {
+	"gold",
+	"goldAmount",
+	"gold_amount",
+	"goldStr",
+	"gold_str",
+}
+
+Analysis.MONEY_SILVER_FIELDS = {
+	"silver",
+	"silverAmount",
+	"silver_amount",
+	"silverStr",
+	"silver_str",
+}
+
+Analysis.MONEY_COPPER_FIELDS = {
+	"copper",
+	"copperAmount",
+	"copper_amount",
+	"copperStr",
+	"copper_str",
+	"cooper",
+}
+
+function Analysis.ExtractMoneyPart(source, fields)
+	for _, fieldName in ipairs(fields) do
+		local value = tonumber(source[fieldName])
+		if value ~= nil and value >= 0 then
+			return value
+		end
+	end
+	return nil
+end
+
+function Analysis.ExtractMoneyCopperFromTable(source, depth)
+	if type(source) ~= "table" or (tonumber(depth) or 0) > 3 then
+		return nil
+	end
+
+	local gold = Analysis.ExtractMoneyPart(source, Analysis.MONEY_GOLD_FIELDS)
+	local silver = Analysis.ExtractMoneyPart(source, Analysis.MONEY_SILVER_FIELDS)
+	local copper = Analysis.ExtractMoneyPart(source, Analysis.MONEY_COPPER_FIELDS)
+	if gold ~= nil or silver ~= nil or copper ~= nil then
+		return math.floor(((gold or 0) * 10000) + ((silver or 0) * 100) + (copper or 0) + 0.5)
+	end
+
+	for _, fieldName in ipairs(Analysis.MONEY_TOTAL_FIELDS) do
+		local amount = Analysis.ParseMoneyCopper(source[fieldName])
+		if amount ~= nil and amount > 0 then
+			return amount
+		end
+	end
+
+	for _, value in pairs(source) do
+		if type(value) == "table" then
+			local amount = Analysis.ExtractMoneyCopperFromTable(value, (tonumber(depth) or 0) + 1)
+			if amount ~= nil then
+				return amount
+			end
+		end
+	end
+	return nil
+end
+
+function Analysis.ExtractMoneyCopperFromEvent(...)
+	local numbers = {}
+	for index = 1, select("#", ...) do
+		local value = select(index, ...)
+		if type(value) == "table" then
+			local amount = Analysis.ExtractMoneyCopperFromTable(value, 0)
+			if amount ~= nil and amount > 0 then
+				return amount
+			end
+		elseif type(value) == "string" then
+			local amount = Analysis.ParseMoneyCopper(value)
+			if amount ~= nil and amount > 0 then
+				return amount
+			end
+		elseif type(value) == "number" then
+			numbers[#numbers + 1] = value
+		end
+	end
+
+	if #numbers == 1 and numbers[1] > 0 then
+		return math.floor(numbers[1] + 0.5)
+	end
+	if #numbers >= 3 then
+		return math.floor(((tonumber(numbers[1]) or 0) * 10000) + ((tonumber(numbers[2]) or 0) * 100) + (tonumber(numbers[3]) or 0) + 0.5)
+	end
+	if #numbers == 2 then
+		return math.floor(((tonumber(numbers[1]) or 0) * 100) + (tonumber(numbers[2]) or 0) + 0.5)
+	end
+	return nil
+end
+
+function Analysis.ExtractMoneyCopperFromCombatMessage(msg)
+	if type(msg) ~= "table" then
+		return nil
+	end
+	return Analysis.ExtractMoneyCopperFromEvent(
+		msg.abilityId,
+		msg.abilityName,
+		msg.damageType,
+		msg.effectType,
+		msg.isActive,
+		msg.arg10,
+		msg.arg11,
+		msg.arg12,
+		msg.arg13
+	)
+end
+
+function Analysis.RecordMoneyEarned(amount, source)
+	amount = math.floor((tonumber(amount) or 0) + 0.5)
+	if amount <= 0 then
+		return false
+	end
+
+	local now = RefreshClock()
+	local lastAmount = tonumber(runtime.lastMoneyEarnedAmount)
+	local lastTime = tonumber(runtime.lastMoneyEarnedTime)
+	local lastSource = tostring(runtime.lastMoneyEarnedSource or "")
+	source = tostring(source or "unknown")
+	if lastAmount == amount and lastTime ~= nil and now - lastTime <= MONEY_EVENT_DEDUPE_SECONDS and source ~= lastSource then
+		return false
+	end
+
+	runtime.totalGoldEarned = (tonumber(runtime.totalGoldEarned) or 0) + amount
+	runtime.lastMoneyEarnedAmount = amount
+	runtime.lastMoneyEarnedTime = now
+	runtime.lastMoneyEarnedSource = source
+	local lastMoney = tonumber(runtime.lastMoneySnapshot)
+	local currentMoney = Analysis.ReadCurrentMoneyCopper()
+	if lastMoney ~= nil then
+		local expectedMoney = lastMoney + amount
+		if currentMoney ~= nil and currentMoney > expectedMoney then
+			runtime.lastMoneySnapshot = currentMoney
+		else
+			runtime.lastMoneySnapshot = expectedMoney
+		end
+	elseif currentMoney ~= nil then
+		runtime.lastMoneySnapshot = currentMoney
+	end
+	Analysis.MarkSessionDataSavePending()
+	if RefreshViewWindowIfVisible ~= nil then
+		RefreshViewWindowIfVisible()
+	end
+	return true
+end
+
+function Analysis.ParseMoneyReturnValues(firstValue, secondValue, thirdValue)
+	if type(firstValue) == "table" then
+		local amount = Analysis.ExtractMoneyCopperFromTable(firstValue, 0)
+		if amount ~= nil then
+			return amount
+		end
+	end
+
+	if thirdValue ~= nil then
+		local gold = tonumber(firstValue)
+		local silver = tonumber(secondValue)
+		local copper = tonumber(thirdValue)
+		if gold ~= nil and silver ~= nil and copper ~= nil and silver >= 0 and silver < 100 and copper >= 0 and copper < 100 then
+			return math.floor((gold * 10000) + (silver * 100) + copper + 0.5)
+		end
+	end
+
+	if secondValue ~= nil then
+		local firstText = string.upper(tostring(firstValue or ""))
+		if string.find(firstText, "GOLD", 1, true) ~= nil then
+			local amount = Analysis.ParseMoneyCopper(secondValue)
+			if amount ~= nil then
+				return amount
+			end
+		end
+	end
+
+	return Analysis.ParseMoneyCopper(firstValue)
+end
+
+function Analysis.ReadBagCurrencyCopper()
+	local ok, firstValue, secondValue, thirdValue = SafeCallValues(X2Bag, "GetCurrency")
+	if not ok then
+		return nil
+	end
+	return Analysis.ParseMoneyReturnValues(firstValue, secondValue, thirdValue)
+end
+
+function Analysis.ReadCurrentMoneyCopper()
+	local bagCurrency = Analysis.ReadBagCurrencyCopper()
+	if bagCurrency ~= nil then
+		return bagCurrency
+	end
+
+	local ok, moneyText = SafeCall(X2Util, "GetMyMoneyString")
+	if not ok and _G ~= nil and type(_G.GetMyMoneyString) == "function" then
+		ok, moneyText = pcall(_G.GetMyMoneyString)
+	end
+	if not ok then
+		return nil
+	end
+	return Analysis.ParseMoneyCopper(moneyText)
+end
+
+-- Track earned gold as positive balance movement only; spending resets the baseline without reducing earned total.
+function Analysis.SyncMoneyEarned()
+	local currentMoney = Analysis.ReadCurrentMoneyCopper()
+	if currentMoney == nil then
+		return false
+	end
+
+	local lastMoney = tonumber(runtime.lastMoneySnapshot)
+	local recorded = false
+	if lastMoney ~= nil and currentMoney > lastMoney then
+		recorded = Analysis.RecordMoneyEarned(currentMoney - lastMoney, "balance")
+	end
+	runtime.lastMoneySnapshot = currentMoney
+	return recorded
+end
+
+function Analysis.HandleMoneyAcquisitionEvent(...)
+	if runtime.playerMoneyHandlerRegistered == true then
+		return false
+	end
+
+	local amount = Analysis.ExtractMoneyCopperFromEvent(...)
+	if amount ~= nil and Analysis.RecordMoneyEarned(amount, "loot") then
+		return true
+	end
+	return Analysis.SyncMoneyEarned()
+end
+
+-- GrindTracker uses UIEVENT_TYPE.PLAYER_MONEY because its first argument is the
+-- wallet delta in copper; count only positive movement so spending never lowers
+-- the Kill Session Analysis total.
+function Analysis.HandlePlayerMoneyChanged(change, changeStr)
+	if runtime.active ~= true then
+		return false
+	end
+
+	RefreshClock()
+	local delta = tonumber(change)
+	if delta == nil and changeStr ~= nil then
+		delta = Analysis.ParseMoneyCopper(changeStr)
+	end
+	delta = math.floor((tonumber(delta) or 0) + 0.5)
+	if delta <= 0 then
+		Analysis.SyncMoneyEarned()
+		return false
+	end
+
+	CaptureSessionActivityLocation()
+	return Analysis.RecordMoneyEarned(delta, "player_money")
+end
+
 function Analysis.AttributeExpGain(amount)
 	amount = math.floor((tonumber(amount) or 0) + 0.5)
 	if amount <= 0 then
@@ -2762,6 +3212,7 @@ end
 function Analysis.SyncSessionResourceSnapshots()
 	Analysis.SyncManaSpent()
 	Analysis.SyncExpGained()
+	Analysis.SyncMoneyEarned()
 end
 
 function Analysis.RecordSessionDamage(sourceName, targetName, damageAmount)
@@ -2816,6 +3267,7 @@ function Analysis.ClearSessionStats()
 	runtime.totalDamageTaken = 0
 	runtime.totalDroppedItems = 0
 	runtime.totalExpGained = 0
+	runtime.totalGoldEarned = 0
 	runtime.totalManaSpent = 0
 	runtime.totalKillTime = 0
 	runtime.combatActive = false
@@ -2829,6 +3281,10 @@ function Analysis.ClearSessionStats()
 	runtime.localPlayerName = nil
 	runtime.lastPlayerMana = nil
 	runtime.lastExpSnapshot = nil
+	runtime.lastMoneySnapshot = nil
+	runtime.lastMoneyEarnedAmount = nil
+	runtime.lastMoneyEarnedTime = nil
+	runtime.lastMoneyEarnedSource = nil
 	runtime.lastDamage = nil
 	runtime.lastDamageTaken = nil
 	runtime.debuffHistory = {}
@@ -3413,6 +3869,19 @@ local function HandleCombatMessage(...)
 	local sourceName = msg.sourceName
 	local targetName = msg.targetName
 	local damageAmount = GetCombatDamageAmount(eventType, msg.abilityId, msg.effectType)
+	if string.find(tostring(eventType or ""), "MONEY", 1, true) ~= nil then
+		if runtime.playerMoneyHandlerRegistered == true then
+			return
+		end
+
+		local amount = Analysis.ExtractMoneyCopperFromCombatMessage(msg)
+		if amount ~= nil then
+			Analysis.RecordMoneyEarned(amount, "combat")
+		else
+			Analysis.SyncMoneyEarned()
+		end
+		return
+	end
 	if sourceName == "" or targetName == "" then
 		return
 	end
@@ -4702,6 +5171,7 @@ Analysis.VIEW_LINE_COLORS = {
 	session_kills = { 1.0, 0.58, 0.20, 1 },
 	damage = { 1.0, 0.78, 0.22, 1 },
 	exp = { 1.0, 0.55, 0.82, 1 },
+	money = MONEY_LABEL_COLOR,
 	items = { 0.78, 0.80, 0.84, 1 },
 	time = { 0.72, 0.52, 1.0, 1 },
 	damage_taken = { 1.0, 0.30, 0.28, 1 },
@@ -4725,7 +5195,7 @@ function Analysis.ApplyViewLineStyle(label, kind)
 	label.style:SetFontSize(kind == "header" and 10 or 9)
 end
 
-function Analysis.AddViewLine(lines, kind, text)
+function Analysis.AddViewLine(lines, kind, text, segments)
 	if #lines >= VIEW_CONTENT_ROW_COUNT then
 		if lines.overflowShown ~= true then
 			lines[VIEW_CONTENT_ROW_COUNT] = { kind = "warning", text = "  ... additional session data not shown" }
@@ -4733,7 +5203,7 @@ function Analysis.AddViewLine(lines, kind, text)
 		end
 		return false
 	end
-	lines[#lines + 1] = { kind = kind, text = text }
+	lines[#lines + 1] = { kind = kind, text = text, segments = segments }
 	return true
 end
 
@@ -4744,6 +5214,7 @@ function Analysis.BuildViewDisplayLines()
 	local totalDamageDealt = tonumber(runtime.totalDamageDealt) or 0
 	local totalDamageTaken = tonumber(runtime.totalDamageTaken) or 0
 	local totalExpGained = tonumber(runtime.totalExpGained) or 0
+	local totalGoldEarned = tonumber(runtime.totalGoldEarned) or 0
 	local totalManaSpent = tonumber(runtime.totalManaSpent) or 0
 	local totalDroppedItems = tonumber(runtime.totalDroppedItems) or 0
 	local totalKillTime = Analysis.GetKillCombatDuration(RefreshClock())
@@ -4768,6 +5239,7 @@ function Analysis.BuildViewDisplayLines()
 		and debuffHistoryCount <= 0
 		and activeDebuffCount <= 0
 		and totalExpGained <= 0
+		and totalGoldEarned <= 0
 		and totalManaSpent <= 0
 		and totalDroppedItems <= 0
 	then
@@ -4781,6 +5253,12 @@ function Analysis.BuildViewDisplayLines()
 	Analysis.AddViewLine(lines, "time", "  Time " .. Analysis.FormatDuration(totalKillTime))
 	Analysis.AddViewLine(lines, "mana", "  Mana " .. Analysis.FormatAmount(totalManaSpent))
 	Analysis.AddViewLine(lines, "exp", "  EXP " .. Analysis.FormatAmount(totalExpGained))
+	Analysis.AddViewLine(
+		lines,
+		"money",
+		"  " .. Analysis.FormatMoneyCopper(totalGoldEarned),
+		Analysis.BuildMoneyLineSegments(totalGoldEarned)
+	)
 	Analysis.AddViewLine(lines, "damage", "  Damage " .. Analysis.FormatAmount(totalDamageDealt))
 	Analysis.AddViewLine(lines, "damage_taken", "  Damage Taken " .. Analysis.FormatAmount(totalDamageTaken))
 	Analysis.AddViewLine(lines, "items", "  Items " .. Analysis.FormatAmount(totalDroppedItems))
@@ -4839,6 +5317,7 @@ function Analysis.HasCurrentSessionData()
 		or #energizeKeys > 0
 		or (tonumber(runtime.totalDroppedItems) or 0) > 0
 		or (tonumber(runtime.totalExpGained) or 0) > 0
+		or (tonumber(runtime.totalGoldEarned) or 0) > 0
 		or (tonumber(runtime.totalManaSpent) or 0) > 0
 end
 
@@ -4853,6 +5332,8 @@ local function BuildCurrentSessionSummary()
 		.. Analysis.FormatAmount(runtime.totalDamageDealt)
 		.. " | EXP "
 		.. Analysis.FormatAmount(runtime.totalExpGained)
+		.. " | "
+		.. Analysis.FormatMoneyCopper(runtime.totalGoldEarned)
 		.. " | Debuffs "
 		.. Analysis.FormatAmount(tonumber(Analysis.EnsurePlayerCombatStats().totalDebuffsApplied) or #(runtime.debuffHistory or {}))
 		.. " | Locations "
@@ -4876,7 +5357,7 @@ local function CopyViewLines(lines)
 end
 
 SaveCurrentSessionToHistory = function()
-	if not Analysis.HasCurrentSessionData() then
+	if not Analysis.HasSessionKills() then
 		return false
 	end
 
@@ -5372,24 +5853,157 @@ viewSummaryLabel.style:SetColor(0.78, 0.84, 0.92, 1)
 viewSummaryLabel.style:SetOutline(true)
 viewSummaryLabel:AddAnchor("TOPLEFT", viewWindow, PADDING, 34)
 
+function Analysis.StartViewWindowDrag(surface)
+	local now = RefreshClock()
+	if surface ~= nil then
+		surface.viewDragSuppressUntil = now + 0.5
+	end
+	viewWindow:StartMoving()
+	return true
+end
+
+function Analysis.StopViewWindowDrag(surface)
+	local now = RefreshClock()
+	if surface ~= nil then
+		surface.viewDragSuppressUntil = now + 0.5
+	end
+	viewWindow:StopMovingOrSizing()
+	SaveWidgetPosition(viewWindow, VIEW_WINDOW_POSITION_KEY)
+	return true
+end
+
+function Analysis.WasViewWindowDragged(surface)
+	local now = RefreshClock()
+	if surface == nil or surface.viewDragSuppressUntil == nil then
+		return false
+	end
+	if now <= surface.viewDragSuppressUntil then
+		surface.viewDragSuppressUntil = nil
+		return true
+	end
+	surface.viewDragSuppressUntil = nil
+	return false
+end
+
+function Analysis.EnableViewWindowDrag(surface)
+	if surface == nil then
+		return
+	end
+	SafeCall(surface, "Clickable", true)
+	SafeCall(surface, "EnablePick", true)
+	SafeCall(surface, "EnableDrag", true)
+	surface:SetHandler("OnDragStart", Analysis.StartViewWindowDrag)
+	surface:SetHandler("OnDragStop", Analysis.StopViewWindowDrag)
+end
+
 for index = 1, VIEW_CONTENT_ROW_COUNT do
 	local row = viewWindow:CreateChildWidget("label", "lootKillCounterViewRow" .. tostring(index), 0, true)
+	local rowY = VIEW_ROW_TOP + ((index - 1) * VIEW_ROW_HEIGHT)
 	row:SetText("")
 	row:SetExtent(VIEW_WINDOW_WIDTH - (PADDING * 2), VIEW_ROW_HEIGHT)
 	row.style:SetAlign(ALIGN_LEFT)
 	row.style:SetFontSize(9)
 	row.style:SetColor(1, 1, 1, 1)
 	row.style:SetOutline(true)
-	row:AddAnchor("TOPLEFT", viewWindow, PADDING, VIEW_ROW_TOP + ((index - 1) * VIEW_ROW_HEIGHT))
+	row:AddAnchor("TOPLEFT", viewWindow, PADDING, rowY)
 	SafeCall(row, "EnablePick", true)
 	SafeCall(row, "Clickable", true)
 	function row:OnClick()
+		if Analysis.WasViewWindowDragged(self) then
+			return
+		end
 		if runtime.viewMode == "history" and self.historySessionIndex ~= nil then
 			runtime:ShowKillMapSession(self.historySessionIndex)
 		end
 	end
 	row:SetHandler("OnClick", row.OnClick)
+	row.segmentLabels = {}
+	row.viewRowY = rowY
+	for segmentIndex = 1, 4 do
+		local segment = viewWindow:CreateChildWidget(
+			"label",
+			"lootKillCounterViewRow" .. tostring(index) .. "Segment" .. tostring(segmentIndex),
+			0,
+			true
+		)
+		segment:SetText("")
+		segment:SetExtent(1, VIEW_ROW_HEIGHT)
+		segment.style:SetAlign(ALIGN_LEFT)
+		segment.style:SetFontSize(9)
+		segment.style:SetColor(1, 1, 1, 1)
+		segment.style:SetOutline(true)
+		segment:AddAnchor("TOPLEFT", viewWindow, PADDING, rowY)
+		SafeCall(segment, "EnablePick", false)
+		segment:Show(false)
+		row.segmentLabels[segmentIndex] = segment
+	end
 	runtime.viewContentRows[index] = row
+end
+
+Analysis.EnableViewWindowDrag(viewWindow)
+Analysis.EnableViewWindowDrag(viewTitleLabel)
+Analysis.EnableViewWindowDrag(viewSummaryLabel)
+for index = 1, VIEW_CONTENT_ROW_COUNT do
+	Analysis.EnableViewWindowDrag(runtime.viewContentRows[index])
+end
+
+local function SetViewSegmentColor(label, color)
+	if label == nil or label.style == nil then
+		return
+	end
+	color = color or MONEY_LABEL_COLOR
+	label.style:SetColor(color[1] or 1, color[2] or 1, color[3] or 1, color[4] or 1)
+end
+
+local function MeasureViewSegmentText(text)
+	return math.max(1, (#tostring(text or "") * VIEW_SEGMENT_CHAR_WIDTH) + 2)
+end
+
+local function HideViewRowSegments(row)
+	if row == nil or type(row.segmentLabels) ~= "table" then
+		return
+	end
+	for _, label in ipairs(row.segmentLabels) do
+		if label ~= nil then
+			label:SetText("")
+			label:Show(false)
+		end
+	end
+end
+
+local function ApplyViewLineToRow(row, line)
+	if row == nil then
+		return
+	end
+	HideViewRowSegments(row)
+	if line == nil then
+		row:SetText("")
+		return
+	end
+
+	Analysis.ApplyViewLineStyle(row, line.kind)
+	if type(line.segments) ~= "table" then
+		row:SetText(tostring(line.text or ""))
+		return
+	end
+
+	-- Money rows use sibling labels so gold, silver, and copper can each keep their own color.
+	row:SetText("")
+	local cursorX = PADDING
+	for segmentIndex, segment in ipairs(line.segments) do
+		local label = row.segmentLabels and row.segmentLabels[segmentIndex] or nil
+		if label ~= nil then
+			local text = tostring(segment.text or "")
+			local width = MeasureViewSegmentText(text)
+			label:SetText(text)
+			label:SetExtent(width, VIEW_ROW_HEIGHT)
+			label:RemoveAllAnchors()
+			label:AddAnchor("TOPLEFT", viewWindow, cursorX, row.viewRowY or 0)
+			SetViewSegmentColor(label, segment.color)
+			label:Show(text ~= "")
+			cursorX = cursorX + width
+		end
+	end
 end
 
 local function SetHistoryViewControlsVisible(visible, hasPages)
@@ -5422,11 +6036,10 @@ UpdateViewWindow = function()
 			if row ~= nil then
 				local line = historyLines[rowIndex]
 				if line == nil then
-					row:SetText("")
+					ApplyViewLineToRow(row, nil)
 					row.historySessionIndex = nil
 				else
-					Analysis.ApplyViewLineStyle(row, line.kind)
-					row:SetText(tostring(line.text or ""))
+					ApplyViewLineToRow(row, line)
 					row.historySessionIndex = line.sessionIndex
 				end
 			end
@@ -5452,10 +6065,9 @@ UpdateViewWindow = function()
 			local line = lines[rowIndex]
 			row.historySessionIndex = nil
 			if line == nil then
-				row:SetText("")
+				ApplyViewLineToRow(row, nil)
 			else
-				Analysis.ApplyViewLineStyle(row, line.kind)
-				row:SetText(tostring(line.text or ""))
+				ApplyViewLineToRow(row, line)
 			end
 		end
 	end
@@ -5545,17 +6157,6 @@ function historyNextButton:OnClick()
 end
 historyNextButton:SetHandler("OnClick", historyNextButton.OnClick)
 
-function viewWindow:OnDragStart()
-	self:StartMoving()
-end
-viewWindow:SetHandler("OnDragStart", viewWindow.OnDragStart)
-
-function viewWindow:OnDragStop()
-	self:StopMovingOrSizing()
-	SaveWidgetPosition(self, VIEW_WINDOW_POSITION_KEY)
-end
-viewWindow:SetHandler("OnDragStop", viewWindow.OnDragStop)
-
 function runtime:ShowKillMapSession(sessionIndex)
 	local session = Analysis.GetHistorySession(sessionIndex)
 	if type(session) ~= "table" then
@@ -5618,13 +6219,20 @@ function eventWindow:OnEvent(event, ...)
 		Analysis.HandleLootAcquisitionEvent(...)
 		return
 	end
+	if event == "MONEY_ACQUISITION_BY_LOOT" then
+		CaptureSessionActivityLocation()
+		Analysis.HandleMoneyAcquisitionEvent(...)
+		return
+	end
 	if event == "LOOT_BAG_CHANGED" then
 		Analysis.ScheduleBagDropSync()
+		Analysis.SyncMoneyEarned()
 		return
 	end
 	if event == "LOOT_BAG_CLOSE" then
 		runtime.pendingBagSyncUntil = nil
 		Analysis.SyncBagDrops(true)
+		Analysis.SyncMoneyEarned()
 		return
 	end
 	if event == "EXP_CHANGED" then
@@ -5652,6 +6260,7 @@ eventWindow:SetHandler("OnEvent", eventWindow.OnEvent)
 
 eventWindow:RegisterEvent("COMBAT_MSG")
 eventWindow:RegisterEvent("ITEM_ACQUISITION_BY_LOOT")
+eventWindow:RegisterEvent("MONEY_ACQUISITION_BY_LOOT")
 eventWindow:RegisterEvent("LOOT_BAG_CHANGED")
 eventWindow:RegisterEvent("LOOT_BAG_CLOSE")
 eventWindow:RegisterEvent("EXP_CHANGED")
@@ -5666,6 +6275,26 @@ eventWindow:RegisterEvent("ENTERED_LOADING")
 eventWindow:RegisterEvent("LEFT_LOADING")
 eventWindow:RegisterEvent("ENTERED_WORLD")
 eventWindow:RegisterEvent("UPDATE_ZONE_LEVEL_INFO")
+
+function Analysis.RegisterPlayerMoneyHandler()
+	runtime.playerMoneyHandlerRegistered = false
+	if UIParent == nil or UIEVENT_TYPE == nil or UIEVENT_TYPE.PLAYER_MONEY == nil then
+		return false
+	end
+	if type(UIParent.SetEventHandler) ~= "function" then
+		return false
+	end
+
+	local ok = pcall(function()
+		UIParent:SetEventHandler(UIEVENT_TYPE.PLAYER_MONEY, function(change, changeStr)
+			Analysis.HandlePlayerMoneyChanged(change, changeStr)
+		end)
+	end)
+	runtime.playerMoneyHandlerRegistered = ok == true
+	return runtime.playerMoneyHandlerRegistered
+end
+
+Analysis.RegisterPlayerMoneyHandler()
 
 function eventWindow:OnUpdate(dt)
 	if not runtime.active then
