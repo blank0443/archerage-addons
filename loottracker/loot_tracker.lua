@@ -167,10 +167,8 @@ local pickerItems = {}
 local pickerSlotIndex = nil
 local pickerScrollIndex = 1
 local pickerSearchText = ""
-local pickerLastObservedSearchText = ""
 local pickerSearchPollElapsed = 0
 local pickerSearchTextEventSuppressed = false
-local pickerSearchCharHandlerActive = false
 local isPickerOpen = false
 local refreshRequested = true
 local inventoryDirty = true
@@ -1636,9 +1634,7 @@ end
 	-- Clears the picker search text, poll state, and clears focus/text on the search box.
 local function ClearPickerSearchState()
 	pickerSearchText = ""
-	pickerLastObservedSearchText = ""
 	pickerSearchPollElapsed = 0
-	pickerSearchCharHandlerActive = false
 	pickerSearchTextEventSuppressed = true
 	if runtime.pickerSearchBox ~= nil then
 		SafeMethod(runtime.pickerSearchBox, "ClearFocus")
@@ -3237,6 +3233,10 @@ local function NextPickerSearchBoxName()
 	return "lootTrackerPickerSearchBox" .. tostring(_G.__LOOT_TRACKER_SEARCH_BOX_SERIAL)
 end
 
+local function CreatePickerSearchBox()
+	return pickerWindow:CreateChildWidgetByType(UOT_X2_EDITBOX, NextPickerSearchBoxName(), 0, true)
+end
+
 local function ConfigurePickerSearchBox(searchBox)
 	-- Configures a picker search box edit widget with anchors, size, font, and visibility.
 	if searchBox == nil then
@@ -3244,12 +3244,21 @@ local function ConfigurePickerSearchBox(searchBox)
 	end
 	searchBox:RemoveAllAnchors()
 	searchBox:AddAnchor("TOPLEFT", pickerWindow, CONFIG.PADDING + 4, CONFIG.PICKER_SEARCH_TOP + 3)
-	searchBox:SetExtent(CONFIG.PICKER_WIDTH - (CONFIG.PADDING * 2) - 8, CONFIG.PICKER_SEARCH_HEIGHT - 6)
+	searchBox:SetHeight(CONFIG.PICKER_SEARCH_HEIGHT - 6)
+	searchBox:SetWidth(CONFIG.PICKER_WIDTH - (CONFIG.PADDING * 2) - 8)
 	searchBox:SetText("")
 	SafeMethod(searchBox, "SetMaxTextLength", 64)
-	SafeMethod(searchBox, "SetInset", 7, 0, 7, 0)
+	SafeMethod(searchBox, "SetInset", 5, 5, 5, 5)
+	SafeMethod(searchBox, "EnableFocus", true)
+	SafeMethod(searchBox, "UseSelectAllWhenFocused", true)
+	SafeMethod(searchBox, "Enable", true)
 	SafeMethod(searchBox, "Show", true)
 	SafeMethod(searchBox, "SetVisible", true)
+	SafeMethod(searchBox, "Clickable", true)
+	SafeMethod(searchBox, "EnableInput", true)
+	SafeMethod(searchBox, "SetInputEnabled", true)
+	SafeMethod(searchBox, "EnableHitTest", true)
+	SafeMethod(searchBox, "SetHitTestEnabled", true)
 	if searchBox.style ~= nil then
 		searchBox.style:SetColor(0.05, 0.06, 0.05, 1)
 		searchBox.style:SetFontSize(13)
@@ -3257,7 +3266,7 @@ local function ConfigurePickerSearchBox(searchBox)
 	end
 end
 
-pickerSearchBox = pickerWindow:CreateChildWidget("editbox", NextPickerSearchBoxName(), 0, true)
+pickerSearchBox = CreatePickerSearchBox()
 runtime.pickerSearchBox = pickerSearchBox
 ConfigurePickerSearchBox(pickerSearchBox)
 
@@ -3282,192 +3291,54 @@ pickerDownButton:SetText("Down")
 pickerDownButton:SetExtent(64, 22)
 pickerDownButton:AddAnchor("TOPRIGHT", pickerWindow, -CONFIG.PADDING, CONFIG.PICKER_CONTROL_TOP)
 
-local pickerSearchGetterCandidates = {
-	{ name = "GetText" },
-	{ name = "GetDisplayText" },
-	{ name = "GetInputText" },
-	{ name = "GetString" },
-	{ name = "GetEditText" },
-	{ name = "GetValue", arg = "text" },
-	{ name = "GetValue", arg = "string" },
-	{ name = "GetValue", arg = "value" },
+local pickerSearchGetterMethods = {
+	"GetText",
+	"GetInputText",
+	"GetEditText",
+	"GetDisplayText",
+	"GetString",
 }
 
 local function ReadPickerSearchBoxText()
-	-- Reads the current text from the picker search box by trying multiple getter methods until a non-empty string is found.
-	local sawEmptyText = false
+	-- Mirrors the Save set input: trust the native editbox text getters and allow an empty string to clear search.
 	local searchBox = runtime.pickerSearchBox
 	if searchBox == nil then
-		return nil
+		return pickerSearchText or ""
 	end
 
-	for _, candidate in ipairs(pickerSearchGetterCandidates) do
-		if not candidate.failed then
-			local fn = searchBox[candidate.name]
-			if type(fn) == "function" then
-				local ok, text = pcall(function()
-					if candidate.arg ~= nil then
-						return fn(searchBox, candidate.arg)
-					end
-					return fn(searchBox)
-				end)
-				if not ok then
-					candidate.failed = true
-				elseif type(text) == "string" then
-					if text ~= "" then
-						return text
-					end
-					sawEmptyText = true
-				end
+	for _, methodName in ipairs(pickerSearchGetterMethods) do
+		local fn = searchBox[methodName]
+		if type(fn) == "function" then
+			local ok, value = pcall(fn, searchBox)
+			if ok and type(value) == "string" then
+				return value
 			end
 		end
 	end
 
-	if pickerSearchText == "" and sawEmptyText then
-		return ""
-	end
-
-	return nil
+	return pickerSearchText or ""
 end
 
-local function SyncPickerSearchBoxText(text)
-	-- Synchronizes the picker search box text across multiple possible setter methods while suppressing events.
+local function SyncPickerSearchBoxText(text, clearWhenEmpty)
+	-- Synchronizes the native editbox through the same setter family used by the Save set input.
+	local value = tostring(text or "")
 	local searchBox = runtime.pickerSearchBox
 	if searchBox == nil then
 		return
 	end
 
 	pickerSearchTextEventSuppressed = true
-	SafeMethod(searchBox, "SetText", text)
-	SafeMethod(searchBox, "SetInputText", text)
-	SafeMethod(searchBox, "SetEditText", text)
-	SafeMethod(searchBox, "SetDisplayText", text)
-	SafeMethod(searchBox, "SetString", text)
+	SafeMethod(searchBox, "SetText", value)
+	SafeMethod(searchBox, "SetInputText", value)
+	SafeMethod(searchBox, "SetEditText", value)
+	SafeMethod(searchBox, "SetDisplayText", value)
+	SafeMethod(searchBox, "SetString", value)
+	if clearWhenEmpty == true and value == "" then
+		SafeMethod(searchBox, "ClearText")
+		SafeMethod(searchBox, "ClearInputText")
+		SafeMethod(searchBox, "ClearEditText")
+	end
 	pickerSearchTextEventSuppressed = false
-end
-
-local function DropLastSearchCharacter(text)
-	-- Drops the last character from text, handling multi-byte UTF8 by finding proper cut point.
-	local len = string.len(text or "")
-	if len <= 0 then
-		return ""
-	end
-
-	local cutIndex = len
-	while cutIndex > 1 do
-		local byte = string.byte(text, cutIndex)
-		if byte == nil or byte < 128 or byte >= 192 then
-			break
-		end
-		cutIndex = cutIndex - 1
-	end
-
-	return string.sub(text, 1, cutIndex - 1)
-end
-
-local function NormalizeKeyToken(value)
-	if type(value) == "number" then
-		return tostring(value)
-	end
-	if type(value) ~= "string" then
-		return nil
-	end
-	local text = string.lower(value)
-	text = string.gsub(text, "%s+", "")
-	text = string.gsub(text, "_", "")
-	text = string.gsub(text, "-", "")
-	return text
-end
-
-local function IsBackspaceKey(value)
-	local token = NormalizeKeyToken(value)
-	return token == "backspace" or token == "back" or token == "8"
-end
-
-local function IsDeleteKey(value)
-	local token = NormalizeKeyToken(value)
-	return token == "delete" or token == "del" or token == "46"
-end
-
-local function IsClearSearchKey(value)
-	local token = NormalizeKeyToken(value)
-	return token == "escape" or token == "esc" or token == "27"
-end
-
-local function FirstPrintableStringArg(...)
-	-- Extracts the first printable string arg from varargs, handling numbers as chars if in range.
-	for i = 1, select("#", ...) do
-		local value = select(i, ...)
-		if type(value) == "number" then
-			if value >= 32 and value <= 126 then
-				return string.char(value)
-			end
-		elseif type(value) == "string" and value ~= "" then
-			local numericValue = tonumber(value)
-			if numericValue ~= nil and string.match(value, "^%d+$") and numericValue >= 32 and numericValue <= 126 then
-				return string.char(numericValue)
-			end
-			local firstByte = string.byte(value, 1)
-			if firstByte ~= nil and firstByte >= 32 and firstByte ~= 127 then
-				return value
-			end
-		end
-	end
-	return nil
-end
-
-local function FirstSearchKeyArg(...)
-	-- Extracts the first string or number arg from varargs for search key handling.
-	for i = 1, select("#", ...) do
-		local value = select(i, ...)
-		if type(value) == "string" or type(value) == "number" then
-			return value
-		end
-	end
-	return nil
-end
-
-local function SearchCharacterFromKey(value)
-	-- Converts a key value to a printable search character, handling numbers, letters, space, numpad etc.
-	if type(value) == "number" then
-		if value == 32 then
-			return " "
-		end
-		if value >= 48 and value <= 57 then
-			return string.char(value)
-		end
-		if value >= 65 and value <= 90 then
-			return string.char(value)
-		end
-		if value >= 96 and value <= 105 then
-			return tostring(value - 96)
-		end
-		return nil
-	end
-
-	if type(value) ~= "string" or value == "" then
-		return nil
-	end
-
-	if string.len(value) == 1 then
-		local byte = string.byte(value, 1)
-		if byte ~= nil and byte >= 32 and byte ~= 127 then
-			return value
-		end
-	end
-
-	local token = NormalizeKeyToken(value)
-	if token == "space" or token == "spacebar" then
-		return " "
-	end
-	if token ~= nil and string.len(token) == 4 and string.sub(token, 1, 3) == "key" then
-		return string.sub(token, 4, 4)
-	end
-	if token ~= nil and string.len(token) == 7 and string.sub(token, 1, 6) == "numpad" then
-		return string.sub(token, 7, 7)
-	end
-
-	return nil
 end
 
 local function ApplyPickerSearchText(nextSearchText, syncSearchBox)
@@ -3477,10 +3348,9 @@ local function ApplyPickerSearchText(nextSearchText, syncSearchBox)
 		return
 	end
 	pickerSearchText = text
-	pickerLastObservedSearchText = text
 	pickerScrollIndex = 1
 	if syncSearchBox then
-		SyncPickerSearchBoxText(text)
+		SyncPickerSearchBoxText(text, false)
 	end
 	UpdatePicker()
 end
@@ -3491,53 +3361,6 @@ local function PollPickerSearchBox()
 	if text ~= nil then
 		ApplyPickerSearchText(text, false)
 	end
-end
-
-local function AppendPickerSearchText(text)
-	-- Appends text to picker search, handling multi-char or single char, then updates.
-	if text == nil or text == "" then
-		PollPickerSearchBox()
-		return
-	end
-
-	if string.len(text) > 1 then
-		ApplyPickerSearchText(text, true)
-	else
-		ApplyPickerSearchText(pickerSearchText .. text, true)
-	end
-end
-
-local function HandlePickerSearchKey(...)
-	-- Handles key input for picker search (backspace, delete, escape, printable chars). Updates search text accordingly.
-	local key = FirstSearchKeyArg(...)
-	if key == nil then
-		PollPickerSearchBox()
-		return
-	end
-
-	if IsBackspaceKey(key) or IsDeleteKey(key) then
-		ApplyPickerSearchText(DropLastSearchCharacter(pickerSearchText), true)
-	elseif IsClearSearchKey(key) then
-		ApplyPickerSearchText("", true)
-	elseif not pickerSearchCharHandlerActive then
-		local character = SearchCharacterFromKey(key)
-		if character ~= nil then
-			AppendPickerSearchText(character)
-		else
-			PollPickerSearchBox()
-		end
-	else
-		PollPickerSearchBox()
-	end
-end
-
-local function HandlePickerSearchChar(...)
-	-- Handles character input for picker search. Sets active flag and appends printable text.
-	local text = FirstPrintableStringArg(...)
-	if text ~= nil then
-		pickerSearchCharHandlerActive = true
-	end
-	AppendPickerSearchText(text)
 end
 
 local function FirstStringArg(...)
@@ -3565,14 +3388,20 @@ local function OnPickerSearchChanged(...)
 	end
 end
 
-local function OnPickerSearchKey(...)
-	-- Handler for picker search key input. Delegates to HandlePickerSearchKey.
-	HandlePickerSearchKey(...)
+local function ActivatePickerSearchInput()
+	if pickerSearchBackground ~= nil then
+		pickerSearchBackground:SetColor(0.95, 0.74, 0.32, 0.46)
+	end
+	PollPickerSearchBox()
+	SafeMethod(runtime.pickerSearchBox, "SetFocus")
+	SafeMethod(runtime.pickerSearchBox, "SetFocus", true)
 end
 
-local function OnPickerSearchChar(...)
-	-- Handler for picker search char input. Sets flag and appends the character to search text.
-	HandlePickerSearchChar(...)
+local function OnPickerSearchFocusLost()
+	if pickerSearchBackground ~= nil then
+		pickerSearchBackground:SetColor(0.86, 0.88, 0.82, 0.42)
+	end
+	PollPickerSearchBox()
 end
 
 local function OnPickerSearchMouseWheel(delta)
@@ -3651,17 +3480,51 @@ local function AttachPickerSearchHandlers(searchBox)
 	if searchBox == nil then
 		return
 	end
-	searchBox:SetHandler("OnTextChanged", OnPickerSearchChanged)
-	searchBox:SetHandler("OnTextChange", OnPickerSearchChanged)
+	SafeMethod(searchBox, "SetHandler", "OnClick", ActivatePickerSearchInput)
+	SafeMethod(searchBox, "SetHandler", "OnMouseDown", ActivatePickerSearchInput)
+	SafeMethod(searchBox, "SetHandler", "OnMouseUp", ActivatePickerSearchInput)
+	SafeMethod(searchBox, "SetHandler", "OnLButtonDown", ActivatePickerSearchInput)
+	SafeMethod(searchBox, "SetHandler", "OnLButtonUp", ActivatePickerSearchInput)
+	SafeMethod(searchBox, "SetHandler", "OnLeftButtonDown", ActivatePickerSearchInput)
+	SafeMethod(searchBox, "SetHandler", "OnLeftButtonUp", ActivatePickerSearchInput)
+	SafeMethod(searchBox, "SetHandler", "OnDoubleClick", ActivatePickerSearchInput)
+	SafeMethod(searchBox, "SetHandler", "OnDoubleClicked", ActivatePickerSearchInput)
+	SafeMethod(searchBox, "SetHandler", "OnTextChanged", OnPickerSearchChanged)
+	SafeMethod(searchBox, "SetHandler", "OnTextChange", OnPickerSearchChanged)
 	SafeMethod(searchBox, "SetHandler", "OnEditTextChanged", OnPickerSearchChanged)
 	SafeMethod(searchBox, "SetHandler", "OnChanged", OnPickerSearchChanged)
-	SafeMethod(searchBox, "SetHandler", "OnChar", OnPickerSearchChar)
-	SafeMethod(searchBox, "SetHandler", "OnTextInput", OnPickerSearchChar)
-	SafeMethod(searchBox, "SetHandler", "OnInput", OnPickerSearchChar)
-	SafeMethod(searchBox, "SetHandler", "OnKeyUp", OnPickerSearchKey)
-	searchBox:SetHandler("OnMouseWheel", OnPickerSearchMouseWheel)
-		-- Reuses the picker search box when available, creating it only if the widget is missing.
-	searchBox:SetHandler("OnWheel", OnPickerSearchMouseWheel)
+	SafeMethod(searchBox, "SetHandler", "OnEditFocusLost", OnPickerSearchFocusLost)
+	SafeMethod(searchBox, "SetHandler", "OnMouseWheel", OnPickerSearchMouseWheel)
+	SafeMethod(searchBox, "SetHandler", "OnWheel", OnPickerSearchMouseWheel)
+end
+
+local function ReleasePickerSearchHandlers(searchBox)
+	if searchBox == nil then
+		return
+	end
+	SafeMethod(searchBox, "ReleaseHandler", "OnClick")
+	SafeMethod(searchBox, "ReleaseHandler", "OnMouseDown")
+	SafeMethod(searchBox, "ReleaseHandler", "OnMouseUp")
+	SafeMethod(searchBox, "ReleaseHandler", "OnLButtonDown")
+	SafeMethod(searchBox, "ReleaseHandler", "OnLButtonUp")
+	SafeMethod(searchBox, "ReleaseHandler", "OnLeftButtonDown")
+	SafeMethod(searchBox, "ReleaseHandler", "OnLeftButtonUp")
+	SafeMethod(searchBox, "ReleaseHandler", "OnDoubleClick")
+	SafeMethod(searchBox, "ReleaseHandler", "OnDoubleClicked")
+	SafeMethod(searchBox, "ReleaseHandler", "OnChar")
+	SafeMethod(searchBox, "ReleaseHandler", "OnTextInput")
+	SafeMethod(searchBox, "ReleaseHandler", "OnInput")
+	SafeMethod(searchBox, "ReleaseHandler", "OnTextChanged")
+	SafeMethod(searchBox, "ReleaseHandler", "OnTextChange")
+	SafeMethod(searchBox, "ReleaseHandler", "OnEditTextChanged")
+	SafeMethod(searchBox, "ReleaseHandler", "OnChanged")
+	SafeMethod(searchBox, "ReleaseHandler", "OnEditFocusLost")
+	SafeMethod(searchBox, "ReleaseHandler", "OnKeyDown")
+	SafeMethod(searchBox, "ReleaseHandler", "OnRawKeyDown")
+	SafeMethod(searchBox, "ReleaseHandler", "OnKeyUp")
+	SafeMethod(searchBox, "ReleaseHandler", "OnRawKeyUp")
+	SafeMethod(searchBox, "ReleaseHandler", "OnMouseWheel")
+	SafeMethod(searchBox, "ReleaseHandler", "OnWheel")
 end
 
 AttachPickerSearchHandlers(pickerSearchBox)
@@ -4522,9 +4385,10 @@ RecreatePickerSearchBox = function()
 	ClearPickerSearchState()
 
 	if runtime.pickerSearchBox == nil then
-		pickerSearchBox = pickerWindow:CreateChildWidget("editbox", NextPickerSearchBoxName(), 0, true)
+		pickerSearchBox = CreatePickerSearchBox()
 	else
 		pickerSearchBox = runtime.pickerSearchBox
+		ReleasePickerSearchHandlers(pickerSearchBox)
 	end
 	runtime.pickerSearchBox = pickerSearchBox
 	ConfigurePickerSearchBox(pickerSearchBox)
