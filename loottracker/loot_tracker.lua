@@ -146,7 +146,12 @@ local CONFIG = {
 	SET_STATUS_OUTSIDE_GAP = 4,
 	SET_NAME_CHAR_WIDTH = 7,
 	SET_NAME_TEXT_MAX_WIDTH = 136,
-	INVENTORY_FALLBACK_REFRESH_SECONDS = 2.0,
+	MAX_TRACKED_SET_COUNT = 40,
+	SET_VISIBLE_ROWS = 10,
+	INVENTORY_FALLBACK_REFRESH_SECONDS = 10.0,
+	INVENTORY_EVENT_DEBOUNCE_SECONDS = 0.15,
+	RESIZE_UPDATE_INTERVAL = 0.05,
+	RESIZE_SCALE_EPSILON = 0.01,
 	SEARCH_POLL_INTERVAL = 0.12,
 }
 CONFIG.BOXES_TOP = CONFIG.TRACKER_TOP_PADDING + CONFIG.HEADER_HEIGHT + CONFIG.TRACKER_ROW_TOP_GAP
@@ -171,6 +176,14 @@ local refreshRequested = true
 local inventoryDirty = true
 local inventoryItemsByKey = nil
 local inventoryOrderedItems = nil
+local inventoryItemsByName = nil
+local inventoryVersion = 0
+local inventoryRefreshPending = false
+local inventoryRefreshPendingElapsed = 0
+local pickerCachedSearchText = nil
+local pickerCachedInventoryVersion = -1
+local pickerCachedItems = nil
+local inventoryIconPathCache = {}
 local trackerLayout = CONFIG.LAYOUT_HORIZONTAL
 local restoreButtonPositionSaved = false
 local pickerWindowPositionSaved = false
@@ -248,6 +261,34 @@ local function ExtractItemGrade(item)
 	return item.grade or item.itemGrade or item.item_grade
 end
 
+local ITEM_ID_FIELD_NAMES = {
+	"itemType",
+	"item_type",
+	"itemTypeId",
+	"item_type_id",
+	"itemId",
+	"item_id",
+	"id",
+	"type",
+}
+
+local function ExtractItemIconCacheKey(item)
+	if type(item) ~= "table" then
+		return nil
+	end
+
+	for _, fieldName in ipairs(ITEM_ID_FIELD_NAMES) do
+		local value = item[fieldName]
+		if type(value) == "string" or type(value) == "number" then
+			local text = Trim(value)
+			if text ~= "" then
+				return text
+			end
+		end
+	end
+	return nil
+end
+
 local ICON_FIELD_NAMES = {
 	"iconPath",
 	"icon_path",
@@ -308,6 +349,17 @@ local function ExtractItemIconPath(item)
 	if type(item) ~= "table" then
 		return nil
 	end
+
+	for _, fieldName in ipairs(ICON_FIELD_NAMES) do
+		local value = item[fieldName]
+		if type(value) == "string" then
+			local text = Trim(value)
+			if text ~= "" then
+				return text
+			end
+		end
+	end
+
 	return ExtractIconPathValue(item, 0)
 end
 
@@ -361,13 +413,25 @@ end
 local function ReadInventory()
 	local itemsByKey = {}
 	local orderedItems = {}
+	local itemsByName = {}
 
 	for posInBag = 1, CONFIG.MAX_BAG_SLOTS do
 		local item = ReadBagItem(posInBag)
 		local name = ExtractItemName(item)
 		if name ~= nil and tostring(name) ~= "" then
 			local grade = ExtractItemGrade(item)
-			local iconPath = ExtractItemIconPath(item)
+			local normalizedName = NormalizeName(name)
+			local iconCacheKey = ExtractItemIconCacheKey(item)
+			local iconPath = nil
+			if iconCacheKey ~= nil then
+				iconPath = inventoryIconPathCache[iconCacheKey]
+			end
+			if iconPath == nil then
+				iconPath = ExtractItemIconPath(item)
+				if iconPath ~= nil and iconCacheKey ~= nil then
+					inventoryIconPathCache[iconCacheKey] = iconPath
+				end
+			end
 			local key = BuildItemKey(name, grade, iconPath) or NormalizeName(name)
 			local count = ExtractItemCount(item)
 			local entry = itemsByKey[key]
@@ -383,6 +447,16 @@ local function ReadInventory()
 				}
 				itemsByKey[key] = entry
 				orderedItems[#orderedItems + 1] = entry
+				if normalizedName ~= "" then
+					local existing = itemsByName[normalizedName]
+					if existing == nil then
+						itemsByName[normalizedName] = entry
+					elseif existing.key ~= nil then
+						itemsByName[normalizedName] = { existing, entry }
+					else
+						existing[#existing + 1] = entry
+					end
+				end
 			elseif entry.iconPath == nil and iconPath ~= nil then
 	-- Marks inventory as dirty and requests refresh.
 				entry.iconPath = iconPath
@@ -393,20 +467,29 @@ local function ReadInventory()
 		end
 	end
 
-	return itemsByKey, orderedItems
+	return itemsByKey, orderedItems, itemsByName
 end
 
-local function MarkInventoryDirty()
+local function MarkInventoryDirty(immediate)
 	inventoryDirty = true
-	refreshRequested = true
+	pickerCachedInventoryVersion = -1
+	if immediate == false then
+		inventoryRefreshPending = true
+		inventoryRefreshPendingElapsed = 0
+	else
+		inventoryRefreshPending = false
+		inventoryRefreshPendingElapsed = 0
+		refreshRequested = true
+	end
 end
 
 local function GetInventorySnapshot(forceRefresh)
 	if forceRefresh or inventoryDirty or inventoryItemsByKey == nil or inventoryOrderedItems == nil then
-		inventoryItemsByKey, inventoryOrderedItems = ReadInventory()
+		inventoryItemsByKey, inventoryOrderedItems, inventoryItemsByName = ReadInventory()
+		inventoryVersion = inventoryVersion + 1
 		inventoryDirty = false
 	end
-	return inventoryItemsByKey, inventoryOrderedItems
+	return inventoryItemsByKey, inventoryOrderedItems, inventoryItemsByName
 end
 
 local function ScoreSearchMatch(name, query)
@@ -451,7 +534,17 @@ end
 local function BuildPickerItems(query)
 	local _, orderedItems = GetInventorySnapshot(false)
 	local normalizedQuery = NormalizeName(query)
+	if pickerCachedInventoryVersion == inventoryVersion
+		and pickerCachedSearchText == normalizedQuery
+		and pickerCachedItems ~= nil
+	then
+		return pickerCachedItems
+	end
+
 	if normalizedQuery == "" then
+		pickerCachedSearchText = normalizedQuery
+		pickerCachedInventoryVersion = inventoryVersion
+		pickerCachedItems = orderedItems
 		return orderedItems
 	end
 
@@ -481,6 +574,9 @@ local function BuildPickerItems(query)
 		return left.name < right.name
 	end)
 
+	pickerCachedSearchText = normalizedQuery
+	pickerCachedInventoryVersion = inventoryVersion
+	pickerCachedItems = matches
 	return matches
 end
 
@@ -1126,6 +1222,10 @@ function runtime:SetRowAcquisitionGlowAlpha(row, alpha)
 	elseif boundedAlpha > CONFIG.ACQUISITION_GLOW_MAX_ALPHA then
 		boundedAlpha = CONFIG.ACQUISITION_GLOW_MAX_ALPHA
 	end
+	if row.lastAcquisitionGlowAlpha == boundedAlpha then
+		return
+	end
+	row.lastAcquisitionGlowAlpha = boundedAlpha
 
 	if row.acquisitionGlowInner ~= nil then
 		local innerAlphaScale = CONFIG.ACQUISITION_GLOW_INNER_MAX_ALPHA / CONFIG.ACQUISITION_GLOW_MAX_ALPHA
@@ -1275,14 +1375,10 @@ function runtime:UpdateAcquisitionGlows(delta)
 		elseif row.acquisitionGlowExpireAt ~= nil then
 			if now > 0 and now >= row.acquisitionGlowExpireAt then
 				shouldClear = true
-			else
-				self:SetRowAcquisitionGlowAlpha(row, CONFIG.ACQUISITION_GLOW_MAX_ALPHA)
 			end
 		elseif row.acquisitionGlowRemaining ~= nil and row.acquisitionGlowRemaining > 0 then
 			row.acquisitionGlowRemaining = row.acquisitionGlowRemaining - safeDelta
-			if row.acquisitionGlowRemaining > 0 then
-				self:SetRowAcquisitionGlowAlpha(row, CONFIG.ACQUISITION_GLOW_MAX_ALPHA)
-			else
+			if row.acquisitionGlowRemaining <= 0 then
 				shouldClear = true
 			end
 		else
@@ -1491,7 +1587,7 @@ end
 
 local UpdateRows
 
-local function ResolveTrackedInventoryEntry(itemsByKey, tracked)
+local function ResolveTrackedInventoryEntry(itemsByKey, tracked, itemsByName)
 	-- Resolves a tracked item to its current inventory entry by key or by name/grade/icon fallback match.
 	if itemsByKey == nil or tracked == nil then
 		return nil
@@ -1507,11 +1603,28 @@ local function ResolveTrackedInventoryEntry(itemsByKey, tracked)
 		return nil
 	end
 
-	for _, item in pairs(itemsByKey) do
+	local candidates = nil
+	if itemsByName ~= nil then
+		candidates = itemsByName[trackedName]
+	end
+	if candidates ~= nil and candidates.key ~= nil then
+		candidates = { candidates }
+	end
+	if candidates == nil then
+		candidates = itemsByKey
+	end
+
+	for _, item in pairs(candidates) do
 		if NormalizeName(item.name) == trackedName then
 			local gradeMatches = tracked.grade == nil or item.grade == tracked.grade
 			local iconMatches = tracked.iconPath == nil or item.iconPath == nil or item.iconPath == tracked.iconPath
 			if gradeMatches and iconMatches then
+				if item.key ~= nil then
+					tracked.key = item.key
+				end
+				if tracked.iconPath == nil and item.iconPath ~= nil then
+					tracked.iconPath = item.iconPath
+				end
 				return item
 			end
 		end
@@ -1541,7 +1654,7 @@ local function ClearPickerSearchState()
 	end
 	pickerSearchTextEventSuppressed = false
 end
-	-- Hides the picker search box and releases all its event handlers.
+	-- Hides the reusable picker search box without destroying or detaching it.
 
 local function HidePickerSearchBox()
 	if runtime.pickerSearchBox == nil then
@@ -1549,17 +1662,6 @@ local function HidePickerSearchBox()
 	end
 	SafeMethod(runtime.pickerSearchBox, "Show", false)
 	SafeMethod(runtime.pickerSearchBox, "SetVisible", false)
-	SafeMethod(runtime.pickerSearchBox, "ReleaseHandler", "OnTextChanged")
-	SafeMethod(runtime.pickerSearchBox, "ReleaseHandler", "OnTextChange")
-	SafeMethod(runtime.pickerSearchBox, "ReleaseHandler", "OnEditTextChanged")
-	SafeMethod(runtime.pickerSearchBox, "ReleaseHandler", "OnChanged")
-	SafeMethod(runtime.pickerSearchBox, "ReleaseHandler", "OnChar")
-	SafeMethod(runtime.pickerSearchBox, "ReleaseHandler", "OnTextInput")
-	SafeMethod(runtime.pickerSearchBox, "ReleaseHandler", "OnInput")
-	SafeMethod(runtime.pickerSearchBox, "ReleaseHandler", "OnKeyUp")
-	SafeMethod(runtime.pickerSearchBox, "ReleaseHandler", "OnUpdate")
-	SafeMethod(runtime.pickerSearchBox, "ReleaseHandler", "OnMouseWheel")
-	SafeMethod(runtime.pickerSearchBox, "ReleaseHandler", "OnWheel")
 	-- Checks if the picker window is currently visible using IsVisible or fallback flag.
 end
 
@@ -1578,6 +1680,21 @@ local function IsPickerWindowVisible()
 
 	-- Clears all tracked items, saves if any were present, and refreshes rows.
 	return isPickerOpen
+end
+
+local function IsTrackerWindowVisible()
+	if trackerWindow == nil then
+		return false
+	end
+
+	local fn = trackerWindow.IsVisible
+	if type(fn) == "function" then
+		local ok, visible = pcall(fn, trackerWindow)
+		if ok then
+			return visible == true
+		end
+	end
+	return true
 end
 
 local function ClearTrackedItems()
@@ -1652,7 +1769,7 @@ end
 
 UpdateRows = function()
 	-- Updates all tracked rows with current inventory counts or missing state from the snapshot.
-	local itemsByKey = GetInventorySnapshot(false)
+	local itemsByKey, _, itemsByName = GetInventorySnapshot(false)
 
 	for index = 1, TRACKED_SLOT_COUNT do
 		local row = rowWidgets[index]
@@ -1661,7 +1778,7 @@ UpdateRows = function()
 			runtime:SyncRowAcquisitionGlow(row, nil, nil)
 			SetRowText(row, "", "", "empty", nil)
 		else
-			local current = ResolveTrackedInventoryEntry(itemsByKey, tracked)
+			local current = ResolveTrackedInventoryEntry(itemsByKey, tracked, itemsByName)
 			if current ~= nil then
 				runtime:SyncRowAcquisitionGlow(row, tracked, current)
 				SetRowText(row, current.name, "x" .. tostring(current.count), "tracked", current.iconPath or tracked.iconPath)
@@ -2671,7 +2788,34 @@ function runtime:CreateTrackerRow(index)
 	rowWidgets[index] = row
 end
 
-function runtime:ChangeSlotCount(delta)
+local function RemoveTrackedSlotAt(removeIndex, currentCount)
+	for index = removeIndex, currentCount - 1 do
+		trackedItems[index] = CopyTrackedItemData(trackedItems[index + 1])
+	end
+	trackedItems[currentCount] = nil
+end
+
+local function FindEmptyTrackedSlotIndex(currentCount)
+	for index = 1, currentCount do
+		if trackedItems[index] == nil then
+			return index
+		end
+	end
+	return nil
+end
+
+local function RemoveOneTrackedSlot(currentCount)
+	-- Reductions preserve tracked items by removing the first empty slot; only full layouts lose the rightmost item.
+	local emptyIndex = FindEmptyTrackedSlotIndex(currentCount)
+	if emptyIndex ~= nil then
+		RemoveTrackedSlotAt(emptyIndex, currentCount)
+	else
+		RemoveTrackedSlotAt(currentCount, currentCount)
+	end
+end
+
+function runtime:ChangeSlotCount(delta, options)
+	options = options or {}
 	local nextCount = TRACKED_SLOT_COUNT + (tonumber(delta) or 0)
 	if nextCount < 1 then
 		nextCount = 1
@@ -2683,23 +2827,33 @@ function runtime:ChangeSlotCount(delta)
 	end
 
 	if nextCount < TRACKED_SLOT_COUNT then
-		for index = nextCount + 1, TRACKED_SLOT_COUNT do
-			trackedItems[index] = nil
+		local currentCount = TRACKED_SLOT_COUNT
+		while currentCount > nextCount do
+			RemoveOneTrackedSlot(currentCount)
+			currentCount = currentCount - 1
 		end
-		if pickerSlotIndex ~= nil and pickerSlotIndex > nextCount then
-			ClosePicker()
-		end
+		ClearTrackerSlotRightDrag()
+		ClosePicker()
 	end
 
 	TRACKED_SLOT_COUNT = nextCount
 	for index = 1, TRACKED_SLOT_COUNT do
 		self:CreateTrackerRow(index)
 	end
-	self:SaveSlotCount()
-	SaveTrackedItems()
-	ApplyTrackerLayout()
-	refreshRequested = true
-	UpdateRows()
+	if not options.skipSave then
+		self:SaveSlotCount()
+		SaveTrackedItems()
+	end
+	if not options.skipLayout and ApplyTrackerLayout ~= nil then
+		ApplyTrackerLayout()
+	end
+	if not options.skipRefresh then
+		refreshRequested = true
+		if not options.skipUpdateRows and UpdateRows ~= nil then
+			UpdateRows()
+		end
+	end
+	return true
 end
 
 function runtime:ApplyResizeGeometry(x, y, scale, shouldSave)
@@ -2881,6 +3035,29 @@ function runtime:ComputeResizeGeometry(handle)
 	return x, y, scale
 end
 
+function runtime:ShouldApplyResizeGeometry(handle, x, y, scale)
+	local data = handle and handle.resizeDrag
+	if data == nil then
+		return true
+	end
+	if data.lastAppliedX == nil then
+		data.lastAppliedX = x
+		data.lastAppliedY = y
+		data.lastAppliedScale = scale
+		return true
+	end
+	if math.abs(x - data.lastAppliedX) >= 1
+		or math.abs(y - data.lastAppliedY) >= 1
+		or math.abs(scale - data.lastAppliedScale) >= CONFIG.RESIZE_SCALE_EPSILON
+	then
+		data.lastAppliedX = x
+		data.lastAppliedY = y
+		data.lastAppliedScale = scale
+		return true
+	end
+	return false
+end
+
 function runtime:CreateResizeHandle(name, anchor)
 	local handle = trackerWindow:CreateChildWidget("button", name, 0, true)
 	handle:SetText("")
@@ -2934,6 +3111,7 @@ function runtime:CreateResizeHandle(name, anchor)
 			handleStartY = handleStartY,
 			resizeFromLeft = self.resizeFromLeft,
 			resizeFromTop = self.resizeFromTop,
+			updateElapsed = CONFIG.RESIZE_UPDATE_INTERVAL,
 		}
 		self:RemoveAllAnchors()
 		self:AddAnchor("TOPLEFT", "UIParent", handleStartX, handleStartY)
@@ -2944,10 +3122,18 @@ function runtime:CreateResizeHandle(name, anchor)
 	end
 	handle:SetHandler("OnDragStart", handle.OnDragStart)
 
-	function handle:OnUpdate()
+	function handle:OnUpdate(dt)
 		if self.isResizing then
+			local data = self.resizeDrag
+			if data ~= nil then
+				data.updateElapsed = (data.updateElapsed or 0) + NormalizeDt(dt)
+				if data.updateElapsed < CONFIG.RESIZE_UPDATE_INTERVAL then
+					return
+				end
+				data.updateElapsed = 0
+			end
 			local x, y, scale = runtime:ComputeResizeGeometry(self)
-			if x ~= nil then
+			if x ~= nil and runtime:ShouldApplyResizeGeometry(self, x, y, scale) then
 				runtime:ApplyResizeGeometry(x, y, scale, false)
 			end
 		end
@@ -3056,6 +3242,7 @@ local function ConfigurePickerSearchBox(searchBox)
 	if searchBox == nil then
 		return
 	end
+	searchBox:RemoveAllAnchors()
 	searchBox:AddAnchor("TOPLEFT", pickerWindow, CONFIG.PADDING + 4, CONFIG.PICKER_SEARCH_TOP + 3)
 	searchBox:SetExtent(CONFIG.PICKER_WIDTH - (CONFIG.PADDING * 2) - 8, CONFIG.PICKER_SEARCH_HEIGHT - 6)
 	searchBox:SetText("")
@@ -3473,7 +3660,7 @@ local function AttachPickerSearchHandlers(searchBox)
 	SafeMethod(searchBox, "SetHandler", "OnInput", OnPickerSearchChar)
 	SafeMethod(searchBox, "SetHandler", "OnKeyUp", OnPickerSearchKey)
 	searchBox:SetHandler("OnMouseWheel", OnPickerSearchMouseWheel)
-	-- Recreates the picker search box widget, clears state, configures it, attaches handlers, and returns the new box.
+		-- Reuses the picker search box when available, creating it only if the widget is missing.
 	searchBox:SetHandler("OnWheel", OnPickerSearchMouseWheel)
 end
 
@@ -3485,6 +3672,8 @@ end
 
 function runtime:LoadTrackedItemSets()
 	self.trackedItemSets = {}
+	self.trackedItemSetsLoaded = true
+	self.trackedItemSetsTruncated = false
 	local ok, data = pcall(function()
 		return ADDON:LoadData(CONFIG.SETS_KEY)
 	end)
@@ -3492,7 +3681,12 @@ function runtime:LoadTrackedItemSets()
 		return
 	end
 
+	local loadedCount = 0
 	for setName, setData in pairs(data) do
+		if loadedCount >= CONFIG.MAX_TRACKED_SET_COUNT then
+			self.trackedItemSetsTruncated = true
+			break
+		end
 		local normalizedName = Trim(setName)
 		if normalizedName ~= "" and type(setData) == "table" then
 			local displayName = Trim(setData.name or setData.displayName or setName)
@@ -3524,11 +3718,28 @@ function runtime:LoadTrackedItemSets()
 				end
 			end
 			self.trackedItemSets[normalizedName] = normalizedSet
+			loadedCount = loadedCount + 1
 		end
 	end
 end
 
+function runtime:EnsureTrackedItemSetsLoaded()
+	if self.trackedItemSetsLoaded ~= true then
+		self:LoadTrackedItemSets()
+	end
+end
+
+function runtime:GetTrackedSetCount()
+	self:EnsureTrackedItemSetsLoaded()
+	local count = 0
+	for _, _ in pairs(self.trackedItemSets or {}) do
+		count = count + 1
+	end
+	return count
+end
+
 function runtime:SaveTrackedItemSets()
+	self:EnsureTrackedItemSetsLoaded()
 	local ok = pcall(function()
 		ADDON:ClearData(CONFIG.SETS_KEY)
 		ADDON:SaveData(CONFIG.SETS_KEY, self.trackedItemSets)
@@ -3537,6 +3748,7 @@ function runtime:SaveTrackedItemSets()
 end
 
 function runtime:GetTrackedSetDisplayName(setName)
+	self:EnsureTrackedItemSetsLoaded()
 	local setData = self.trackedItemSets[setName]
 	if type(setData) == "table" then
 		local displayName = Trim(setData.name or setData.displayName)
@@ -3548,6 +3760,7 @@ function runtime:GetTrackedSetDisplayName(setName)
 end
 
 function runtime:FindTrackedSetKeyByName(setName)
+	self:EnsureTrackedItemSetsLoaded()
 	local exactName = Trim(setName)
 	if exactName == "" then
 		return nil
@@ -3569,6 +3782,7 @@ function runtime:FindTrackedSetKeyByName(setName)
 end
 
 function runtime:GetSortedTrackedSetNames()
+	self:EnsureTrackedItemSetsLoaded()
 	local names = {}
 	for setName, _ in pairs(self.trackedItemSets or {}) do
 		names[#names + 1] = setName
@@ -3738,6 +3952,7 @@ function runtime:ReadSetNameInput()
 end
 
 function runtime:ApplyTrackedSet(setName)
+	self:EnsureTrackedItemSetsLoaded()
 	local setData = self.trackedItemSets[setName]
 	if type(setData) ~= "table" then
 		self:SetTrackerSetStatus("Set not found.", 1, 0.58, 0.45)
@@ -3753,7 +3968,11 @@ function runtime:ApplyTrackedSet(setName)
 	end
 
 	if self.ChangeSlotCount ~= nil and slotCount ~= TRACKED_SLOT_COUNT then
-		self:ChangeSlotCount(slotCount - TRACKED_SLOT_COUNT)
+		self:ChangeSlotCount(slotCount - TRACKED_SLOT_COUNT, {
+			skipSave = true,
+			skipLayout = true,
+			skipRefresh = true,
+		})
 	end
 
 	for index = 1, 20 do
@@ -3769,8 +3988,9 @@ function runtime:ApplyTrackedSet(setName)
 	end
 
 	self.selectedSetName = setName
+	self:SaveSlotCount()
 	SaveTrackedItems()
-	MarkInventoryDirty()
+	MarkInventoryDirty(true)
 	if ApplyTrackerLayout ~= nil then
 		ApplyTrackerLayout()
 	end
@@ -3780,6 +4000,7 @@ function runtime:ApplyTrackedSet(setName)
 end
 
 function runtime:SaveNamedTrackedSet(overwrite)
+	self:EnsureTrackedItemSetsLoaded()
 	local setName = self:ReadSetNameInput()
 	local displayName = setName
 	local existingSetName = nil
@@ -3806,6 +4027,10 @@ function runtime:SaveNamedTrackedSet(overwrite)
 		self:SetTrackerSetStatus("Set exists. Use Overwrite.", 1, 0.72, 0.42)
 		return
 	end
+	if existingSetName == nil and self:GetTrackedSetCount() >= CONFIG.MAX_TRACKED_SET_COUNT then
+		self:SetTrackerSetStatus("Set limit reached.", 1, 0.58, 0.45)
+		return
+	end
 
 	local captured, itemCount = self:CaptureTrackedSet()
 	if itemCount == 0 then
@@ -3825,15 +4050,12 @@ function runtime:SaveNamedTrackedSet(overwrite)
 	end
 
 	self:UpdateTrackerSetList()
-	if self.RecreateSetNameInput ~= nil then
-		self:RecreateSetNameInput()
-	else
-		self:SyncSetNameInputText("")
-	end
+	self:SyncSetNameInputText("")
 	self:SetTrackerSetStatus("Saved " .. displayName .. " (" .. tostring(itemCount) .. " items).", 0.62, 1, 0.62)
 end
 
 function runtime:DeleteNamedTrackedSet(setName)
+	self:EnsureTrackedItemSetsLoaded()
 	local name = Trim(setName or self:ReadSetNameInput())
 	local savedName = self:FindTrackedSetKeyByName(name)
 	if savedName == nil and name == "" then
@@ -3896,6 +4118,12 @@ function runtime:CreateTrackerSetRow(index)
 	end
 	row:SetHandler("OnClick", row.OnClick)
 
+	function row:OnMouseWheel(delta)
+		runtime:ScrollTrackerSetList(delta)
+	end
+	row:SetHandler("OnMouseWheel", row.OnMouseWheel)
+	row:SetHandler("OnWheel", row.OnMouseWheel)
+
 	row:Show(false)
 	self.trackerSetRows[index] = row
 	return row
@@ -3907,9 +4135,25 @@ function runtime:UpdateTrackerSetList()
 	end
 
 	local names = self:GetSortedTrackedSetNames()
-	self:UpdateTrackerSetWindowSize(#names)
+	local total = #names
+	local visibleCount = total
+	if visibleCount > CONFIG.SET_VISIBLE_ROWS then
+		visibleCount = CONFIG.SET_VISIBLE_ROWS
+	end
+	local maxStart = total - visibleCount + 1
+	if maxStart < 1 then
+		maxStart = 1
+	end
+	self.setListScrollIndex = math.floor(tonumber(self.setListScrollIndex) or 1)
+	if self.setListScrollIndex < 1 then
+		self.setListScrollIndex = 1
+	elseif self.setListScrollIndex > maxStart then
+		self.setListScrollIndex = maxStart
+	end
+	self:UpdateTrackerSetWindowSize(visibleCount)
 
-	for rowIndex, setName in ipairs(names) do
+	for rowIndex = 1, visibleCount do
+		local setName = names[self.setListScrollIndex + rowIndex - 1]
 		local row = self.trackerSetRows[rowIndex]
 		if row == nil then
 			row = self:CreateTrackerSetRow(rowIndex)
@@ -3935,7 +4179,7 @@ function runtime:UpdateTrackerSetList()
 		end
 	end
 
-	for rowIndex = #names + 1, #self.trackerSetRows do
+	for rowIndex = visibleCount + 1, #self.trackerSetRows do
 		local row = self.trackerSetRows[rowIndex]
 		if row ~= nil then
 			row.setName = nil
@@ -3944,10 +4188,22 @@ function runtime:UpdateTrackerSetList()
 	end
 end
 
+function runtime:ScrollTrackerSetList(delta)
+	self:EnsureTrackedItemSetsLoaded()
+	local amount = tonumber(delta) or 0
+	if amount > 0 then
+		self.setListScrollIndex = (self.setListScrollIndex or 1) - 1
+	else
+		self.setListScrollIndex = (self.setListScrollIndex or 1) + 1
+	end
+	self:UpdateTrackerSetList()
+end
+
 function runtime:CreateTrackerSetWindow()
 	if self.setWindow ~= nil then
 		return self.setWindow
 	end
+	self:EnsureTrackedItemSetsLoaded()
 
 	_G.__LOOT_TRACKER_SET_NAME_INPUT_SERIAL = (_G.__LOOT_TRACKER_SET_NAME_INPUT_SERIAL or 0) + 1
 	local window = CreateEmptyWindow("lootTrackerSetWindow", "UIParent")
@@ -4218,11 +4474,18 @@ function runtime:CreateTrackerSetWindow()
 	end
 	window:SetHandler("OnDragStop", window.OnDragStop)
 
+	function window:OnMouseWheel(delta)
+		runtime:ScrollTrackerSetList(delta)
+	end
+	window:SetHandler("OnMouseWheel", window.OnMouseWheel)
+	window:SetHandler("OnWheel", window.OnMouseWheel)
+
 	self:UpdateTrackerSetList()
 	return window
 end
 
 function runtime:OpenTrackerSetWindow()
+	self:EnsureTrackedItemSetsLoaded()
 	if self.setWindow == nil then
 		self:CreateTrackerSetWindow()
 	end
@@ -4255,14 +4518,14 @@ function runtime:ToggleTrackerSetWindow()
 	end
 end
 
-runtime:LoadTrackedItemSets()
-runtime:CreateTrackerSetWindow()
-
 RecreatePickerSearchBox = function()
 	ClearPickerSearchState()
-	HidePickerSearchBox()
 
-	pickerSearchBox = pickerWindow:CreateChildWidget("editbox", NextPickerSearchBoxName(), 0, true)
+	if runtime.pickerSearchBox == nil then
+		pickerSearchBox = pickerWindow:CreateChildWidget("editbox", NextPickerSearchBoxName(), 0, true)
+	else
+		pickerSearchBox = runtime.pickerSearchBox
+	end
 	runtime.pickerSearchBox = pickerSearchBox
 	ConfigurePickerSearchBox(pickerSearchBox)
 	AttachPickerSearchHandlers(pickerSearchBox)
@@ -4425,12 +4688,17 @@ local watchedEvents = {
 }
 
 local function IsLootTrackerResetCommandText(value)
-	local text = string.lower(Trim(value))
-	if text ~= "/loottracker reset" then
+	if type(value) ~= "string" then
 		return false
 	end
-
-	return true
+	local length = string.len(value)
+	if length < 18 or length > 24 then
+		return false
+	end
+	if string.sub(value, 1, 1) ~= "/" then
+		return false
+	end
+	return string.lower(Trim(value)) == "/loottracker reset"
 end
 
 local function IsOwnLootTrackerResetCommand(name, message)
@@ -4445,26 +4713,15 @@ local function IsOwnLootTrackerResetCommand(name, message)
 	return name == X2Unit:UnitName("player")
 end
 
-local function HasLootTrackerResetCommandText(...)
-	for index = 1, select("#", ...) do
-		if IsLootTrackerResetCommandText(select(index, ...)) then
-			return true
-		end
-	end
-	return false
-end
-
-local function HandleLootTrackerChatCommand(channel, relation, name, message, info, ...)
-	if IsOwnLootTrackerResetCommand(name, message)
-		or HasLootTrackerResetCommandText(channel, relation, name, message, info, ...)
-	then
+local function HandleLootTrackerChatCommand(channel, relation, name, message, info)
+	if IsOwnLootTrackerResetCommand(name, message) then
 		CenterLootTrackerWindow()
 	end
 end
 
 function trackerWindow:OnEvent(event)
 	if watchedEvents[event] then
-		MarkInventoryDirty()
+		MarkInventoryDirty(false)
 	end
 end
 trackerWindow:SetHandler("OnEvent", trackerWindow.OnEvent)
@@ -4497,6 +4754,14 @@ function trackerWindow:OnUpdate(dt)
 
 	local delta = NormalizeDt(dt)
 	inventoryFallbackRefreshElapsed = inventoryFallbackRefreshElapsed + delta
+	if inventoryRefreshPending then
+		inventoryRefreshPendingElapsed = inventoryRefreshPendingElapsed + delta
+		if inventoryRefreshPendingElapsed >= CONFIG.INVENTORY_EVENT_DEBOUNCE_SECONDS then
+			inventoryRefreshPending = false
+			inventoryRefreshPendingElapsed = 0
+			refreshRequested = true
+		end
+	end
 	if isPickerOpen and not IsPickerWindowVisible() then
 		ClosePicker()
 	end
@@ -4508,9 +4773,11 @@ function trackerWindow:OnUpdate(dt)
 		end
 	end
 
-	if inventoryFallbackRefreshElapsed >= CONFIG.INVENTORY_FALLBACK_REFRESH_SECONDS then
+	if (IsTrackerWindowVisible() or IsPickerWindowVisible())
+		and inventoryFallbackRefreshElapsed >= CONFIG.INVENTORY_FALLBACK_REFRESH_SECONDS
+	then
 		inventoryFallbackRefreshElapsed = 0
-		MarkInventoryDirty()
+		MarkInventoryDirty(false)
 	end
 
 	runtime:UpdateAcquisitionGlows(delta)

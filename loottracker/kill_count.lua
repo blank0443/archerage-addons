@@ -7,12 +7,16 @@ ADDON:ImportObject(OBJECT_TYPE.BUTTON)
 ADDON:ImportObject(OBJECT_TYPE.COLOR_DRAWABLE)
 ADDON:ImportObject(OBJECT_TYPE.WINDOW)
 ADDON:ImportObject(OBJECT_TYPE.LABEL)
+ADDON:ImportObject(OBJECT_TYPE.WORLD_MAP)
 
 ADDON:ImportAPI(API_TYPE.UNIT.id)
 ADDON:ImportAPI(API_TYPE.PLAYER.id)
 ADDON:ImportAPI(API_TYPE.BAG.id)
 ADDON:ImportAPI(API_TYPE.WORLD.id)
 ADDON:ImportAPI(API_TYPE.MAP.id)
+if API_TYPE.TEAM ~= nil then
+	ADDON:ImportAPI(API_TYPE.TEAM.id)
+end
 if API_TYPE.UTIL ~= nil then
 	ADDON:ImportAPI(API_TYPE.UTIL.id)
 end
@@ -277,6 +281,7 @@ local runtime = {
 	damageDealtByUnit = {},
 	damageTakenByUnit = {},
 	damageBySkill = {},
+	skillUsageByName = {},
 	damageByCategory = {},
 	damageByElement = {},
 	healBySkill = {},
@@ -287,11 +292,9 @@ local runtime = {
 	damageByTarget = {},
 	sessionKillLocations = {},
 	playerCombatStats = {},
-	debuffHistory = {},
-	activeDebuffsOnPlayer = {},
-	nextDebuffEventId = 1,
 	itemDropsByUnit = {},
 	expByUnit = {},
+	recentKillExpValues = {},
 	totalDamageDealt = 0,
 	totalDamageTaken = 0,
 	totalDroppedItems = 0,
@@ -299,7 +302,6 @@ local runtime = {
 	totalGoldEarned = 0,
 	totalManaSpent = 0,
 	lastPlayerMana = nil,
-	lastExpSnapshot = nil,
 	lastMoneySnapshot = nil,
 	lastMoneyEarnedAmount = nil,
 	lastMoneyEarnedTime = nil,
@@ -310,6 +312,7 @@ local runtime = {
 	combatStart = nil,
 	lastCombatActivity = nil,
 	totalKillTime = 0,
+	sessionStartTime = nil,
 	lastDamage = nil,
 	lastDamageTaken = nil,
 	lastBagSnapshot = nil,
@@ -324,6 +327,13 @@ local runtime = {
 	currentTargetTargetName = nil,
 	currentTargetWasAlive = false,
 	currentTargetDeathCounted = false,
+	localPlayerWasAlive = true,
+	localPlayerDeathCounted = false,
+	localPlayerLastHealth = nil,
+	allyPlayerNames = {},
+	allyPlayerNamesUpdatedAt = 0,
+	playerDeathCounterNames = {},
+	recentPlayerDeathTimes = {},
 	lastKill = nil,
 	autoOpenCounterWindow = false,
 	rows = {},
@@ -333,7 +343,8 @@ local runtime = {
 	nextHistorySessionIndex = 1,
 	historyPage = 1,
 	gameLoadingStarted = false,
-	debuffSyncElapsed = 0,
+	targetRefreshElapsed = 0,
+	targetRefreshDirty = false,
 	savePending = false,
 	pendingSaveEvents = 0,
 	saveElapsed = 0,
@@ -350,15 +361,18 @@ local runtime = {
 _G.__LOOT_KILL_COUNTER_RUNTIME = runtime
 local Analysis = _G.__LOOT_KILL_COUNTER_ANALYSIS or {}
 _G.__LOOT_KILL_COUNTER_ANALYSIS = Analysis
-Analysis.DEBUFF_HISTORY_LIMIT = 50
-Analysis.DEBUFF_VIEW_LIMIT = 5
-Analysis.SESSION_SAVE_INTERVAL_SECONDS = 5
-Analysis.SESSION_SAVE_EVENT_BATCH = 30
+Analysis.SESSION_SAVE_INTERVAL_SECONDS = 10
+Analysis.SESSION_SAVE_EVENT_BATCH = 100
+Analysis.TARGET_REFRESH_INTERVAL_SECONDS = 0.5
 Analysis.KILL_LOCATION_LIMIT = 400
-Analysis.KILL_MAP_HOTSPOT_LIMIT = 12
-Analysis.KILL_MAP_HOTSPOT_CELL_SIZE = 54
+Analysis.HISTORY_BACKUP_SAVE_KEY = "lootKillCounterHistoryBackup"
+Analysis.HISTORY_TEXT_WRAP_CHARS = math.max(32, math.floor((VIEW_WINDOW_WIDTH - (PADDING * 2)) / VIEW_SEGMENT_CHAR_WIDTH) - 2)
+Analysis.RECENT_KILL_EXP_LIMIT = 20
+Analysis.AEK_KILL_WINDOW = 5
+Analysis.PLAYER_DEATH_DEDUPE_SECONDS = 5
+Analysis.KILL_MAP_COMMON_COORD_TOLERANCE = 54
+Analysis.KILL_MAP_COMMON_MARKER_RADIUS = 24
 Analysis.KILL_MAP_EFFECT_LIMIT = 18
-Analysis.KILL_MAP_ROUTE_EFFECT_LIMIT = 8
 Analysis.KILL_MAP_EFFECT_RETRY_SECONDS = 0.25
 Analysis.KILL_MAP_EFFECT_RETRY_LIMIT = 12
 
@@ -380,11 +394,39 @@ local function RefreshClock()
 	return runtime.clock
 end
 
+function Analysis.EnsureSessionStartTime(now)
+	now = now or RefreshClock()
+	local startTime = tonumber(runtime.sessionStartTime)
+	if startTime == nil or startTime <= 0 or startTime > now then
+		startTime = now
+		runtime.sessionStartTime = startTime
+	end
+	return startTime
+end
+
+function Analysis.GetSessionElapsedSeconds(now)
+	now = now or RefreshClock()
+	local startTime = Analysis.EnsureSessionStartTime(now)
+	local elapsed = now - startTime
+	if elapsed < 0 then
+		return 0
+	end
+	return elapsed
+end
+
 local function SafeCall(target, methodName, ...)
 	if target == nil or type(target[methodName]) ~= "function" then
 		return false, nil
 	end
 	return pcall(target[methodName], target, ...)
+end
+
+local function SafeNumber(value, fallback)
+	local number = tonumber(value)
+	if number == nil then
+		return fallback
+	end
+	return number
 end
 
 local function SafeCallValues(target, methodName, ...)
@@ -493,6 +535,112 @@ local function IsLocalPlayerName(value)
 		return true
 	end
 	return NamesMatch(value, StripWorldSuffix(GetLocalPlayerName()))
+end
+
+function Analysis.GetPlayerNameKey(name)
+	name = StripWorldSuffix(name)
+	local key = NormalizeName(name)
+	if key == "" or key == "unknown" then
+		return nil
+	end
+	return key
+end
+
+function Analysis.RememberAllyPlayerName(name)
+	local key = Analysis.GetPlayerNameKey(name)
+	if key ~= nil then
+		runtime.allyPlayerNames[key] = true
+	end
+end
+
+function Analysis.RememberAllyPlayerToken(unitToken)
+	if X2Unit == nil then
+		return
+	end
+	local ok, unitName = SafeCall(X2Unit, "UnitName", unitToken)
+	if ok and IsValidName(unitName) then
+		Analysis.RememberAllyPlayerName(unitName)
+	end
+	ok, unitName = SafeCall(X2Unit, "UnitNameWithWorld", unitToken)
+	if ok and IsValidName(unitName) then
+		Analysis.RememberAllyPlayerName(unitName)
+	end
+end
+
+function Analysis.RefreshAllyPlayerNames()
+	runtime.allyPlayerNames = {}
+	Analysis.RememberAllyPlayerName(GetLocalPlayerName())
+	if X2Team ~= nil then
+		for teamIndex = 0, 2 do
+			for memberIndex = 1, 50 do
+				local ok, memberName = SafeCall(X2Team, "GetTeamMemberName", teamIndex, memberIndex)
+				if ok and IsValidName(memberName) then
+					Analysis.RememberAllyPlayerName(memberName)
+				end
+			end
+		end
+	end
+	for memberIndex = 1, 50 do
+		Analysis.RememberAllyPlayerToken("team_1_" .. tostring(memberIndex))
+		Analysis.RememberAllyPlayerToken("team" .. tostring(memberIndex))
+		Analysis.RememberAllyPlayerToken("team_" .. tostring(memberIndex))
+		Analysis.RememberAllyPlayerToken("team_2_" .. tostring(memberIndex))
+	end
+	runtime.allyPlayerNamesUpdatedAt = os.clock and os.clock() or 0
+end
+
+function Analysis.IsAlliedPlayerName(name)
+	if IsLocalPlayerName(name) then
+		return true
+	end
+	local key = Analysis.GetPlayerNameKey(name)
+	if key == nil then
+		return false
+	end
+	local now = os.clock and os.clock() or 0
+	if type(runtime.allyPlayerNames) ~= "table" or now - (tonumber(runtime.allyPlayerNamesUpdatedAt) or 0) > 2 then
+		Analysis.RefreshAllyPlayerNames()
+	end
+	return runtime.allyPlayerNames[key] == true
+end
+
+function Analysis.MarkPlayerDeathCounterName(name)
+	local key = Analysis.GetPlayerNameKey(name)
+	if key ~= nil then
+		runtime.playerDeathCounterNames[key] = true
+	end
+end
+
+function Analysis.IsPlayerDeathCounterName(name)
+	if IsLocalPlayerName(name) then
+		return true
+	end
+	local key = Analysis.GetPlayerNameKey(name)
+	return key ~= nil and runtime.playerDeathCounterNames[key] == true
+end
+
+function Analysis.ResolveAlliedPlayerDeathName(value)
+	if type(value) ~= "string" then
+		return nil
+	end
+	local text = Trim(value)
+	if text == "" then
+		return nil
+	end
+	if text == "player" or Analysis.IsAlliedPlayerName(text) then
+		return text
+	end
+	if X2Unit ~= nil then
+		local ok, unitName = SafeCall(X2Unit, "UnitName", text)
+		if ok and Analysis.IsAlliedPlayerName(unitName) then
+			return unitName
+		end
+		ok, unitName = SafeCall(X2Unit, "UnitNameWithWorld", text)
+		if ok and Analysis.IsAlliedPlayerName(unitName) then
+			return unitName
+		end
+	end
+	return nil
 end
 
 local function NormalizeLocationPart(value)
@@ -784,6 +932,17 @@ local function LoadKillCounts()
 		end
 	end
 
+	runtime.playerDeathCounterNames = {}
+	if type(data.playerDeathCounterNames) == "table" then
+		for name, value in pairs(data.playerDeathCounterNames) do
+			if value == true then
+				Analysis.MarkPlayerDeathCounterName(name)
+			elseif type(value) == "string" then
+				Analysis.MarkPlayerDeathCounterName(value)
+			end
+		end
+	end
+
 	if type(data.lastKill) == "table" then
 		runtime.lastKill = data.lastKill
 	end
@@ -798,6 +957,9 @@ local function LoadKillCounts()
 	end
 	if type(data.damageBySkill) == "table" then
 		runtime.damageBySkill = data.damageBySkill
+	end
+	if type(data.skillUsageByName) == "table" then
+		runtime.skillUsageByName = data.skillUsageByName
 	end
 	if type(data.damageByCategory) == "table" then
 		runtime.damageByCategory = data.damageByCategory
@@ -835,6 +997,9 @@ local function LoadKillCounts()
 	if type(data.expByUnit) == "table" then
 		runtime.expByUnit = data.expByUnit
 	end
+	if type(data.recentKillExpValues) == "table" then
+		runtime.recentKillExpValues = Analysis.NormalizeRecentKillExpValues(data.recentKillExpValues)
+	end
 	runtime.totalDamageDealt = tonumber(data.totalDamageDealt) or runtime.totalDamageDealt
 	runtime.totalDamageTaken = tonumber(data.totalDamageTaken) or runtime.totalDamageTaken
 	runtime.totalDroppedItems = tonumber(data.totalDroppedItems) or runtime.totalDroppedItems
@@ -842,28 +1007,20 @@ local function LoadKillCounts()
 	runtime.totalGoldEarned = tonumber(data.totalGoldEarned) or runtime.totalGoldEarned
 	runtime.totalManaSpent = tonumber(data.totalManaSpent) or runtime.totalManaSpent
 	runtime.totalKillTime = tonumber(data.totalKillTime) or runtime.totalKillTime
+	runtime.sessionStartTime = tonumber(data.sessionStartTime) or runtime.sessionStartTime
 	if type(data.lastDamage) == "table" then
 		runtime.lastDamage = data.lastDamage
 	end
 	if type(data.lastDamageTaken) == "table" then
 		runtime.lastDamageTaken = data.lastDamageTaken
 	end
-	if type(data.debuffHistory) == "table" then
-		runtime.debuffHistory = data.debuffHistory
-	end
-	if type(data.activeDebuffsOnPlayer) == "table" then
-		runtime.activeDebuffsOnPlayer = data.activeDebuffsOnPlayer
-	end
-	runtime.nextDebuffEventId = tonumber(data.nextDebuffEventId) or runtime.nextDebuffEventId or 1
 	if IsValidName(data.sessionLocationText) then
 		runtime.sessionLocationText = tostring(data.sessionLocationText)
 	end
 	if IsValidName(data.loadingStartLocationText) then
 		runtime.loadingStartLocationText = tostring(data.loadingStartLocationText)
 	end
-	if Analysis.TrimDebuffHistory ~= nil then
-		Analysis.TrimDebuffHistory()
-	end
+	Analysis.EnsureSessionStartTime(RefreshClock())
 	if Analysis.RebuildDamageCategories ~= nil then
 		Analysis.RebuildDamageCategories()
 	end
@@ -873,11 +1030,13 @@ local function SaveKillCounts()
 	SaveData(SAVE_KEY, {
 		kills = runtime.killCounts,
 		killerCounts = runtime.killerCounts,
+		playerDeathCounterNames = runtime.playerDeathCounterNames,
 		lastKill = runtime.lastKill,
 		sessionKillCounts = runtime.sessionKillCounts,
 		damageDealtByUnit = runtime.damageDealtByUnit,
 		damageTakenByUnit = runtime.damageTakenByUnit,
 		damageBySkill = runtime.damageBySkill,
+		skillUsageByName = runtime.skillUsageByName,
 		damageByCategory = runtime.damageByCategory,
 		damageByElement = runtime.damageByElement,
 		healBySkill = runtime.healBySkill,
@@ -890,6 +1049,7 @@ local function SaveKillCounts()
 		playerCombatStats = runtime.playerCombatStats,
 		itemDropsByUnit = runtime.itemDropsByUnit,
 		expByUnit = runtime.expByUnit,
+		recentKillExpValues = runtime.recentKillExpValues,
 		totalDamageDealt = runtime.totalDamageDealt,
 		totalDamageTaken = runtime.totalDamageTaken,
 		totalDroppedItems = runtime.totalDroppedItems,
@@ -897,11 +1057,9 @@ local function SaveKillCounts()
 		totalGoldEarned = runtime.totalGoldEarned,
 		totalManaSpent = runtime.totalManaSpent,
 		totalKillTime = runtime.totalKillTime,
+		sessionStartTime = Analysis.EnsureSessionStartTime(RefreshClock()),
 		lastDamage = runtime.lastDamage,
 		lastDamageTaken = runtime.lastDamageTaken,
-		debuffHistory = runtime.debuffHistory,
-		activeDebuffsOnPlayer = runtime.activeDebuffsOnPlayer,
-		nextDebuffEventId = runtime.nextDebuffEventId,
 		sessionLocationText = runtime.sessionLocationText,
 		loadingStartLocationText = runtime.loadingStartLocationText,
 	})
@@ -917,7 +1075,7 @@ function Analysis.FlushSessionDataSave(force)
 	if force ~= true then
 		local pendingEvents = tonumber(runtime.pendingSaveEvents) or 0
 		local elapsed = tonumber(runtime.saveElapsed) or 0
-		if pendingEvents < Analysis.SESSION_SAVE_EVENT_BATCH and elapsed < Analysis.SESSION_SAVE_INTERVAL_SECONDS then
+		if pendingEvents < Analysis.SESSION_SAVE_EVENT_BATCH or elapsed < Analysis.SESSION_SAVE_INTERVAL_SECONDS then
 			return
 		end
 	end
@@ -927,9 +1085,6 @@ end
 function Analysis.MarkSessionDataSavePending()
 	runtime.savePending = true
 	runtime.pendingSaveEvents = (tonumber(runtime.pendingSaveEvents) or 0) + 1
-	if runtime.pendingSaveEvents >= Analysis.SESSION_SAVE_EVENT_BATCH then
-		Analysis.FlushSessionDataSave(true)
-	end
 end
 
 function Analysis.RoundCoordinate(value)
@@ -1013,9 +1168,204 @@ function Analysis.CopyKillLocations(points)
 	return copied
 end
 
+function Analysis.NormalizeRecentKillExpValues(values)
+	local normalized = {}
+	if type(values) ~= "table" then
+		return normalized
+	end
+
+	for _, entry in ipairs(values) do
+		if type(entry) == "table" then
+			local exp = tonumber(entry.exp)
+			if exp ~= nil then
+				exp = math.max(0, math.floor(exp + 0.5))
+			end
+			normalized[#normalized + 1] = {
+				mobName = tostring(entry.mobName or ""),
+				time = tonumber(entry.time) or 0,
+				exp = exp,
+				pending = entry.pending == true and exp == nil,
+			}
+		elseif tonumber(entry) ~= nil then
+			normalized[#normalized + 1] = {
+				mobName = "",
+				time = 0,
+				exp = math.max(0, math.floor(tonumber(entry) + 0.5)),
+				pending = false,
+			}
+		end
+	end
+
+	while #normalized > Analysis.RECENT_KILL_EXP_LIMIT do
+		table.remove(normalized, 1)
+	end
+	return normalized
+end
+
+function Analysis.AddRecentKillExpEntry(mobName)
+	local entries = runtime.recentKillExpValues
+	if type(entries) ~= "table" then
+		entries = {}
+		runtime.recentKillExpValues = entries
+	end
+	entries[#entries + 1] = {
+		mobName = Trim(mobName or ""),
+		time = RefreshClock(),
+		exp = nil,
+		pending = true,
+	}
+	while #entries > Analysis.RECENT_KILL_EXP_LIMIT do
+		table.remove(entries, 1)
+	end
+end
+
+function Analysis.ApplyExpToRecentKill(amount)
+	amount = math.floor((tonumber(amount) or 0) + 0.5)
+	if amount <= 0 or type(runtime.recentKillExpValues) ~= "table" then
+		return false
+	end
+
+	local now = RefreshClock()
+	local targetEntry = nil
+	for _, entry in ipairs(runtime.recentKillExpValues) do
+		if type(entry) == "table"
+			and entry.pending == true
+			and now - (tonumber(entry.time) or 0) <= EXP_ATTRIBUTION_SECONDS
+		then
+			targetEntry = entry
+			break
+		end
+	end
+	if targetEntry == nil then
+		for index = #runtime.recentKillExpValues, 1, -1 do
+			local entry = runtime.recentKillExpValues[index]
+			if type(entry) == "table" and now - (tonumber(entry.time) or 0) <= EXP_ATTRIBUTION_SECONDS then
+				targetEntry = entry
+				break
+			end
+		end
+	end
+	if targetEntry == nil then
+		return false
+	end
+
+	targetEntry.exp = (tonumber(targetEntry.exp) or 0) + amount
+	targetEntry.pending = false
+	return true
+end
+
+function Analysis.GetTotalAverageExpPerKill()
+	local kills = Analysis.GetSessionKillTotal()
+	if kills <= 0 then
+		return 0
+	end
+	return (tonumber(runtime.totalExpGained) or 0) / kills
+end
+
+-- AEK uses the last five completed kill EXP records once enough kills exist.
+-- During EXP event delay or on older saves, it falls back to total session EXP
+-- divided by total session kills.
+function Analysis.GetAverageExpPerKill(now)
+	now = now or RefreshClock()
+	local sessionKills = Analysis.GetSessionKillTotal()
+	if sessionKills <= 0 then
+		return 0
+	end
+	if sessionKills < Analysis.AEK_KILL_WINDOW then
+		return Analysis.GetTotalAverageExpPerKill()
+	end
+
+	local values = {}
+	for index = #(runtime.recentKillExpValues or {}), 1, -1 do
+		local entry = runtime.recentKillExpValues[index]
+		if type(entry) == "table" then
+			local exp = tonumber(entry.exp)
+			if exp ~= nil then
+				values[#values + 1] = exp
+			elseif now - (tonumber(entry.time) or 0) >= EXP_ATTRIBUTION_SECONDS then
+				values[#values + 1] = 0
+			else
+				return Analysis.GetTotalAverageExpPerKill()
+			end
+			if #values >= Analysis.AEK_KILL_WINDOW then
+				break
+			end
+		end
+	end
+
+	if #values < Analysis.AEK_KILL_WINDOW then
+		return Analysis.GetTotalAverageExpPerKill()
+	end
+	local total = 0
+	for _, exp in ipairs(values) do
+		total = total + exp
+	end
+	return total / Analysis.AEK_KILL_WINDOW
+end
+
+function Analysis.GetDistanceLocationCoordinates(point)
+	if type(point) ~= "table" then
+		return nil, nil, nil, nil
+	end
+	local x = tonumber(point.localX)
+	local y = tonumber(point.localY)
+	local source = "local"
+	if x == nil or y == nil then
+		x = tonumber(point.worldX)
+		y = tonumber(point.worldY)
+		source = "world"
+	end
+	if x == nil or y == nil then
+		x = tonumber(point.x)
+		y = tonumber(point.y)
+		source = tostring(point.coordinateSource or "player")
+	end
+	if x == nil or y == nil then
+		return nil, nil, nil, nil
+	end
+	return x, y, source, tonumber(point.zoneGroup)
+end
+
+-- Distance uses cardinal movement between recorded kill points. Zone/source
+-- changes are skipped so teleports and incompatible coordinate systems do not
+-- inflate the traveled total.
+function Analysis.GetDistanceTraveledFromLocations(points)
+	local total = 0
+	local lastX = nil
+	local lastY = nil
+	local lastSource = nil
+	local lastZoneGroup = nil
+
+	for _, point in ipairs(points or {}) do
+		local x, y, source, zoneGroup = Analysis.GetDistanceLocationCoordinates(point)
+		if x ~= nil and y ~= nil then
+			if lastX ~= nil
+				and lastSource == source
+				and (lastZoneGroup == nil or zoneGroup == nil or lastZoneGroup == zoneGroup)
+			then
+				total = total + math.abs(x - lastX) + math.abs(y - lastY)
+			end
+			lastX = x
+			lastY = y
+			lastSource = source
+			lastZoneGroup = zoneGroup
+		end
+	end
+
+	return total
+end
+
+function Analysis.GetSessionDistanceTraveled()
+	return Analysis.GetDistanceTraveledFromLocations(runtime.sessionKillLocations)
+end
+
 function Analysis.GetSavedSessionKillTotal(session)
 	if type(session) ~= "table" then
 		return 0
+	end
+	local savedTotal = tonumber(session.killTotal or session.sessionKillTotal or session.sessionKills)
+	if savedTotal ~= nil and savedTotal > 0 then
+		return math.floor(savedTotal)
 	end
 	if type(session.killCounts) == "table" then
 		local total = 0
@@ -1106,54 +1456,109 @@ function Analysis.RecordKillLocation(mobName, killerName)
 	return true
 end
 
-local function LoadSessionHistory()
-	local data = LoadData(HISTORY_SAVE_KEY)
+function Analysis.BuildHistorySessionStorageKey(name, createdAt, summary)
+	name = Trim(name or "")
+	local createdAtText = tostring(tonumber(createdAt) or 0)
+	summary = tostring(summary or "")
+	if name == "" and createdAtText == "0" and summary == "" then
+		return nil
+	end
+	return name .. "|" .. createdAtText .. "|" .. summary
+end
+
+function Analysis.GetHistorySessionStorageKey(session)
+	if type(session) ~= "table" then
+		return nil
+	end
+	return Analysis.BuildHistorySessionStorageKey(session.name, session.createdAt, session.summary)
+end
+
+function Analysis.MarkLoadedHistorySessions(seen)
+	for _, session in ipairs(runtime.historySessions or {}) do
+		local key = Analysis.GetHistorySessionStorageKey(session)
+		if key ~= nil then
+			seen[key] = true
+		end
+	end
+end
+
+-- Merge saved history rows into memory instead of replacing the visible list.
+-- This lets the backup save repair the primary save and prevents UI refreshes
+-- from dropping sessions that are already listed in the History window.
+function Analysis.AppendSavedHistoryData(data, seen)
 	if type(data) ~= "table" then
-		return
+		return 0, nil
 	end
 
 	local sessions = data.sessions or data
 	local maxIndex = 0
+	local appended = 0
 	if type(sessions) == "table" then
-		for _, session in ipairs(sessions) do
+		for sourceIndex, session in ipairs(sessions) do
 			if type(session) == "table" then
 				local name = Trim(session.name or "")
 				if name == "" then
-					name = "S" .. tostring(#runtime.historySessions + 1)
+					name = "S" .. tostring(sourceIndex)
 				end
 				local sessionIndex = tonumber(string.match(name, "^S(%d+)"))
 				if sessionIndex ~= nil and sessionIndex > maxIndex then
 					maxIndex = sessionIndex
 				end
 
-				local normalizedLines = {}
-				if type(session.lines) == "table" then
-					for _, line in ipairs(session.lines) do
-						if type(line) == "table" then
-							normalizedLines[#normalizedLines + 1] = {
-								kind = tostring(line.kind or "metric"),
-								text = tostring(line.text or ""),
-							}
-						end
-					end
+				local sessionKey = Analysis.BuildHistorySessionStorageKey(name, session.createdAt, session.summary)
+				if sessionKey == nil then
+					sessionKey = "fallback|" .. name .. "|" .. tostring(#runtime.historySessions + appended + 1)
 				end
 
-				if Analysis.GetSavedSessionKillTotal(session) > 0 then
+				if seen[sessionKey] ~= true and Analysis.GetSavedSessionKillTotal(session) > 0 then
+					local normalizedLines = {}
+					if type(session.lines) == "table" then
+						for _, line in ipairs(session.lines) do
+							if type(line) == "table" then
+								normalizedLines[#normalizedLines + 1] = {
+									kind = tostring(line.kind or "metric"),
+									text = tostring(line.text or ""),
+								}
+							end
+						end
+					end
+
+					local killLocations = Analysis.CopyKillLocations(session.killLocations)
 					runtime.historySessions[#runtime.historySessions + 1] = {
 						name = name,
 						location = tostring(session.location or ""),
 						date = tostring(session.date or ""),
 						summary = tostring(session.summary or ""),
+						killTotal = Analysis.GetSavedSessionKillTotal(session),
 						createdAt = tonumber(session.createdAt) or 0,
+						sessionElapsedSeconds = tonumber(session.sessionElapsedSeconds) or 0,
+						killTimeSeconds = tonumber(session.killTimeSeconds) or 0,
+						distanceTraveled = tonumber(session.distanceTraveled) or Analysis.GetDistanceTraveledFromLocations(killLocations),
+						killsPerMinute = tonumber(session.killsPerMinute) or 0,
+						expPerMinute = tonumber(session.expPerMinute) or 0,
+						averageExpPerKill = tonumber(session.averageExpPerKill) or 0,
 						lines = normalizedLines,
-						killLocations = Analysis.CopyKillLocations(session.killLocations),
+						killLocations = killLocations,
 					}
+					seen[sessionKey] = true
+					appended = appended + 1
 				end
 			end
 		end
 	end
 
-	local nextIndex = tonumber(data.nextIndex)
+	return maxIndex, tonumber(data.nextIndex), appended
+end
+
+local function LoadSessionHistory()
+	local seen = {}
+	Analysis.MarkLoadedHistorySessions(seen)
+	local primaryData = LoadData(HISTORY_SAVE_KEY)
+	local backupData = LoadData(Analysis.HISTORY_BACKUP_SAVE_KEY)
+	local primaryMaxIndex, primaryNextIndex = Analysis.AppendSavedHistoryData(primaryData, seen)
+	local backupMaxIndex, backupNextIndex = Analysis.AppendSavedHistoryData(backupData, seen)
+	local maxIndex = math.max(tonumber(primaryMaxIndex) or 0, tonumber(backupMaxIndex) or 0)
+	local nextIndex = math.max(tonumber(primaryNextIndex) or 0, tonumber(backupNextIndex) or 0)
 	if nextIndex == nil or nextIndex <= maxIndex then
 		nextIndex = maxIndex + 1
 	end
@@ -1163,11 +1568,17 @@ local function LoadSessionHistory()
 	runtime.nextHistorySessionIndex = nextIndex
 end
 
-local function SaveSessionHistory()
-	SaveData(HISTORY_SAVE_KEY, {
+function Analysis.BuildSessionHistorySavePayload()
+	return {
 		nextIndex = runtime.nextHistorySessionIndex,
 		sessions = runtime.historySessions,
-	})
+		savedAt = RefreshClock(),
+	}
+end
+
+local function SaveSessionHistory()
+	SaveData(Analysis.HISTORY_BACKUP_SAVE_KEY, Analysis.BuildSessionHistorySavePayload())
+	SaveData(HISTORY_SAVE_KEY, Analysis.BuildSessionHistorySavePayload())
 end
 
 local function GetTotalKillCount()
@@ -1245,6 +1656,44 @@ function Analysis.FormatAmount(value)
 	return tostring(value)
 end
 
+function Analysis.FormatCompactAmount(value)
+	local amount = math.floor((tonumber(value) or 0) + 0.5)
+	local absolute = math.abs(amount)
+	local divisor = nil
+	local suffix = ""
+	if absolute >= 1000000000 then
+		divisor = 1000000000
+		suffix = "b"
+	elseif absolute >= 1000000 then
+		divisor = 1000000
+		suffix = "m"
+	elseif absolute >= 1000 then
+		divisor = 1000
+		suffix = "k"
+	end
+	if divisor == nil then
+		return tostring(amount)
+	end
+
+	local scaled = amount / divisor
+	if suffix == "k" and math.abs(scaled) >= 999.5 then
+		scaled = amount / 1000000
+		suffix = "m"
+	elseif suffix == "m" and math.abs(scaled) >= 999.5 then
+		scaled = amount / 1000000000
+		suffix = "b"
+	end
+	local scaledAbs = math.abs(scaled)
+	local text
+	if scaledAbs >= 100 then
+		text = string.format("%.0f", scaled)
+	else
+		text = string.format("%.1f", scaled)
+		text = string.gsub(text, "%.0$", "")
+	end
+	return text .. suffix
+end
+
 function Analysis.FormatDuration(seconds)
 	seconds = math.floor((tonumber(seconds) or 0) + 0.5)
 	if seconds < 60 then
@@ -1258,6 +1707,28 @@ function Analysis.FormatDuration(seconds)
 	local hours = math.floor(minutes / 60)
 	minutes = minutes - (hours * 60)
 	return tostring(hours) .. "h " .. tostring(minutes) .. "m"
+end
+
+function Analysis.FormatPerMinute(value)
+	local rate = tonumber(value) or 0
+	if rate <= 0 then
+		return "0/m"
+	end
+	if rate >= 1000 then
+		return Analysis.FormatCompactAmount(rate) .. "/m"
+	end
+	if rate >= 10 then
+		return tostring(math.floor(rate + 0.5)) .. "/m"
+	end
+	return string.format("%.1f/m", rate)
+end
+
+function Analysis.FormatDistanceMeters(value)
+	local meters = math.floor((tonumber(value) or 0) + 0.5)
+	if meters <= 0 then
+		return "0m"
+	end
+	return Analysis.FormatCompactAmount(meters) .. "m"
 end
 
 function Analysis.TruncateText(value, maxLength)
@@ -1299,13 +1770,7 @@ Analysis.DAMAGE_CATEGORY_ORDER = { "Melee", "Spell", "Ranged", "Environmental", 
 
 function Analysis.FormatDamage(value)
 	local amount = math.floor(tonumber(value) or 0)
-	if amount >= 1000000 then
-		return string.format("%.1fM", amount / 1000000)
-	end
-	if amount >= 1000 then
-		return string.format("%.1fK", amount / 1000)
-	end
-	return tostring(amount)
+	return Analysis.FormatCompactAmount(amount)
 end
 
 function Analysis.FormatDps(value)
@@ -1415,6 +1880,23 @@ function Analysis.BuildSkillStorageKey(category, eventType, abilityId, abilityNa
 	return tostring(category or "Other") .. "::" .. Analysis.NormalizeAbilityName(abilityName, eventType, abilityId)
 end
 
+function Analysis.RecordSkillUse(eventType, abilityId, abilityName, count)
+	local displayName = Analysis.NormalizeAbilityName(abilityName, eventType, abilityId)
+	if displayName == "" then
+		displayName = "Unknown"
+	end
+	local entry = runtime.skillUsageByName[displayName]
+	if type(entry) ~= "table" then
+		entry = {
+			name = displayName,
+			count = 0,
+		}
+		runtime.skillUsageByName[displayName] = entry
+	end
+	entry.name = displayName
+	entry.count = (tonumber(entry.count) or 0) + (tonumber(count) or 1)
+end
+
 function Analysis.GetEffectAmount(eventKind, eventType, abilityId, effectType)
 	if eventKind ~= "damage" and eventKind ~= "heal" and eventKind ~= "energize" then
 		return nil
@@ -1496,6 +1978,7 @@ function Analysis.RecordSkillDamage(sourceName, targetName, eventType, abilityId
 	end
 	entry.damage = (tonumber(entry.damage) or 0) + damageAmount
 	entry.hits = (tonumber(entry.hits) or 0) + 1
+	Analysis.RecordSkillUse(eventType, abilityId, abilityName, 1)
 	Analysis.TrackDamageElement(damageType, damageAmount)
 	Analysis.IncrementPlayerStat("totalHits", 1)
 	Analysis.UpdateExtremeStat("largestHit", damageAmount)
@@ -1519,6 +2002,7 @@ function Analysis.RecordHeal(sourceName, eventType, abilityId, abilityName, heal
 	end
 	entry.amount = (tonumber(entry.amount) or 0) + healAmount
 	entry.hits = (tonumber(entry.hits) or 0) + 1
+	Analysis.RecordSkillUse(eventType, abilityId, abilityName, 1)
 	Analysis.IncrementPlayerStat("totalHealingHits", 1)
 	Analysis.UpdateExtremeStat("largestHeal", healAmount)
 end
@@ -1544,6 +2028,7 @@ function Analysis.RecordMiss(sourceName, eventType, abilityId, abilityName)
 		runtime.missesBySkill[skillKey] = entry
 	end
 	entry.count = (tonumber(entry.count) or 0) + 1
+	Analysis.RecordSkillUse(eventType, abilityId, abilityName, 1)
 	Analysis.IncrementPlayerStat("totalMisses", 1)
 	if category == "Melee" then
 		Analysis.IncrementPlayerStat("meleeMisses", 1)
@@ -1568,6 +2053,7 @@ function Analysis.RecordEnergize(sourceName, eventType, abilityId, abilityName, 
 	end
 	entry.amount = (tonumber(entry.amount) or 0) + amount
 	entry.hits = (tonumber(entry.hits) or 0) + 1
+	Analysis.RecordSkillUse(eventType, abilityId, abilityName, 1)
 end
 
 function Analysis.RecordDamageTaken(sourceName, damageAmount)
@@ -1619,644 +2105,12 @@ function Analysis.GetCombatAuraEventKind(eventType)
 	return nil
 end
 
-function Analysis.ParseGameCombatAuraResult(msg)
-	if type(msg) ~= "table" or _G == nil or type(_G.ParseCombatMessage) ~= "function" then
-		return nil
-	end
-	local ok, result = pcall(
-		_G.ParseCombatMessage,
-		msg.eventType,
-		msg.abilityId,
-		msg.abilityName,
-		msg.damageType,
-		msg.effectType,
-		msg.isActive,
-		msg.arg10,
-		msg.arg11,
-		msg.arg12,
-		msg.arg13
-	)
-	if ok and type(result) == "table" then
-		return result
-	end
-	return nil
-end
-
-function Analysis.NormalizeDebuffDurationSeconds(timeLeft, timeUnit)
-	timeLeft = tonumber(timeLeft)
-	if timeLeft == nil or timeLeft <= 0 then
-		return nil
-	end
-	if timeUnit == "sec" then
-		return timeLeft
-	end
-	return timeLeft / 1000
-end
-
-function Analysis.FormatDebuffDurationSeconds(seconds)
-	seconds = tonumber(seconds)
-	if seconds == nil or seconds <= 0 then
-		return "unknown"
-	end
-	if seconds >= 3600 then
-		return string.format("%.1fh", seconds / 3600)
-	end
-	if seconds >= 60 then
-		return string.format("%.1fm", seconds / 60)
-	end
-	return string.format("%.1fs", seconds)
-end
-
-function Analysis.ExtractDebuffEffectsFromTooltip(tooltip)
-	if type(tooltip) ~= "table" then
-		return ""
-	end
-
-	local parts = {}
-	local description = Trim(tooltip.description or tooltip.effectDescription or "")
-	if description ~= "" then
-		parts[#parts + 1] = description
-	end
-
-	if type(tooltip.modifier) == "table" then
-		local modifierCount = math.min(#tooltip.modifier, 4)
-		for index = 1, modifierCount do
-			local modifier = tooltip.modifier[index]
-			if type(modifier) == "table" then
-				local modifierName = Trim(modifier.name or "")
-				local modifierValue = modifier.value
-				if modifierName ~= "" and modifierValue ~= nil then
-					parts[#parts + 1] = modifierName .. " " .. tostring(modifierValue)
-				end
-			end
-		end
-	end
-
-	return table.concat(parts, "; ")
-end
-
-function Analysis.GetDebuffBuffId(debuffInfo)
-	if type(debuffInfo) ~= "table" then
-		return nil
-	end
-	return debuffInfo.buff_id or debuffInfo.buffId or debuffInfo.id
-end
-
-function Analysis.GetDebuffDisplayNameFromInfo(debuffInfo)
-	if type(debuffInfo) ~= "table" then
-		return ""
-	end
-	return Trim(debuffInfo.name or debuffInfo.title or debuffInfo.buff_name or "")
-end
-
-function Analysis.GetDebuffStorageKey(entry)
-	if type(entry) ~= "table" then
-		return nil
-	end
-	if entry.buffId ~= nil then
-		return "id:" .. tostring(entry.buffId)
-	end
-	local name = Trim(entry.name or "")
-	if name ~= "" then
-		return "name:" .. NormalizeName(name)
-	end
-	return nil
-end
-
-function Analysis.GetDebuffStorageKeyFromInfo(debuffInfo)
-	if type(debuffInfo) ~= "table" then
-		return nil
-	end
-	local buffId = Analysis.GetDebuffBuffId(debuffInfo)
-	if buffId ~= nil then
-		return "id:" .. tostring(buffId)
-	end
-	local name = Analysis.GetDebuffDisplayNameFromInfo(debuffInfo)
-	if name ~= "" then
-		return "name:" .. NormalizeName(name)
-	end
-	return nil
-end
-
-function Analysis.FindDebuffHistoryEntry(storageKey, activeOnly)
-	for index = #runtime.debuffHistory, 1, -1 do
-		local entry = runtime.debuffHistory[index]
-		if type(entry) == "table" and Analysis.GetDebuffStorageKey(entry) == storageKey then
-			if activeOnly ~= true or entry.active == true then
-				return entry, index
-			end
-		end
-	end
-	return nil, nil
-end
-
-function Analysis.TrimDebuffHistory()
-	while #runtime.debuffHistory > Analysis.DEBUFF_HISTORY_LIMIT do
-		table.remove(runtime.debuffHistory, 1)
-	end
-end
-
-function Analysis.FindPlayerDebuffSnapshot(spellName, buffId)
-	if X2Unit == nil then
-		return nil
-	end
-
-	local okCount, debuffCount = SafeCall(X2Unit, "UnitDeBuffCount", "player")
-	debuffCount = okCount and tonumber(debuffCount) or 0
-	if debuffCount <= 0 then
-		return nil
-	end
-
-	spellName = NormalizeName(spellName)
-	local numericBuffId = tonumber(buffId)
-
-	for index = 1, debuffCount do
-		local okInfo, debuffInfo = SafeCall(X2Unit, "UnitDeBuff", "player", index)
-		if okInfo and type(debuffInfo) == "table" then
-			local matches = false
-			if numericBuffId ~= nil and tonumber(Analysis.GetDebuffBuffId(debuffInfo)) == numericBuffId then
-				matches = true
-			elseif spellName ~= "" then
-				local debuffName = NormalizeName(Analysis.GetDebuffDisplayNameFromInfo(debuffInfo))
-				if debuffName ~= "" and debuffName == spellName then
-					matches = true
-				end
-			end
-
-			if matches then
-				local okTooltip, tooltip = SafeCall(X2Unit, "UnitDeBuffTooltip", "player", index)
-				return {
-					index = index,
-					info = debuffInfo,
-					tooltip = okTooltip and tooltip or nil,
-				}
-			end
-		end
-	end
-
-	return nil
-end
-
-function Analysis.ResolveDebuffSourceName()
-	if type(runtime.lastDamageTaken) == "table" then
-		local sourceName = Trim(runtime.lastDamageTaken.sourceName or "")
-		local takenAt = tonumber(runtime.lastDamageTaken.time) or 0
-		if sourceName ~= "" and RefreshClock() - takenAt <= 12 then
-			return sourceName
-		end
-	end
-
-	if type(runtime.lastDamage) == "table" and IsLocalPlayerName(runtime.lastDamage.targetName) then
-		local sourceName = Trim(runtime.lastDamage.sourceName or "")
-		if sourceName ~= "" and not IsLocalPlayerName(sourceName) then
-			return sourceName
-		end
-	end
-
-	local targetName = SafeUnitName("target")
-	if IsValidName(targetName) and not IsLocalPlayerName(targetName) then
-		return Trim(targetName)
-	end
-
-	return "Unknown"
-end
-
-function Analysis.ResolveDebuffDisplayName(msg, auraResult)
-	if type(auraResult) == "table" then
-		local spellName = Trim(auraResult.spellName or "")
-		if spellName ~= "" then
-			return spellName
-		end
-	end
-	if type(msg) == "table" then
-		local abilityName = Trim(msg.abilityName or "")
-		if abilityName ~= "" then
-			return abilityName
-		end
-		return Analysis.NormalizeAbilityName(msg.abilityName, msg.eventType, msg.abilityId)
-	end
-	return "Unknown Debuff"
-end
-
-function Analysis.IsPlayerDebuffAura(auraResult)
-	if type(auraResult) ~= "table" then
-		return true
-	end
-	local auraType = Trim(tostring(auraResult.auraType or ""))
-	return auraType == "" or auraType == "DEBUFF"
-end
-
-function Analysis.IsLocalPlayerTarget(msg)
-	if type(msg) ~= "table" then
-		return false
-	end
-	if IsLocalPlayerName(msg.targetName) then
-		return true
-	end
-	return Trim(tostring(msg.unitId or "")) == "player"
-end
-
-function Analysis.CreateDebuffHistoryEntry(msg, auraResult, snapshot)
-	local now = RefreshClock()
-	local debuffName = Analysis.ResolveDebuffDisplayName(msg, auraResult)
-	local sourceName = Trim((msg and msg.sourceName) or "Unknown")
-	if sourceName == "" then
-		sourceName = "Unknown"
-	end
-
-	local buffId = nil
-	local stacks = 1
-	local durationSec = nil
-	local effects = ""
-
-	if type(snapshot) == "table" and type(snapshot.info) == "table" then
-		buffId = snapshot.info.buff_id or snapshot.info.buffId or snapshot.info.id
-		stacks = tonumber(snapshot.info.stack or snapshot.info.stacks) or 1
-		durationSec = Analysis.NormalizeDebuffDurationSeconds(
-			snapshot.info.timeLeft or snapshot.info.time_left,
-			snapshot.info.timeUnit or snapshot.info.time_unit
-		)
-		effects = Analysis.ExtractDebuffEffectsFromTooltip(snapshot.tooltip)
-	end
-
-	if type(auraResult) == "table" then
-		if buffId == nil and auraResult.buffId ~= nil then
-			buffId = auraResult.buffId
-		end
-		if buffId == nil and auraResult.spellId ~= nil then
-			buffId = auraResult.spellId
-		end
-		if tonumber(auraResult.stack) ~= nil then
-			stacks = tonumber(auraResult.stack)
-		end
-		if durationSec == nil then
-			durationSec = Analysis.NormalizeDebuffDurationSeconds(
-				auraResult.duration or auraResult.timeLeft,
-				auraResult.timeUnit
-			)
-		end
-	end
-
-	local entry = {
-		id = runtime.nextDebuffEventId,
-		name = debuffName,
-		source = sourceName,
-		buffId = buffId,
-		appliedAt = now,
-		removedAt = nil,
-		durationSec = durationSec,
-		actualDurationSec = nil,
-		stacks = stacks,
-		effects = effects,
-		refreshCount = 0,
-		active = true,
-		applyCount = 1,
-	}
-	runtime.nextDebuffEventId = runtime.nextDebuffEventId + 1
-	runtime.debuffHistory[#runtime.debuffHistory + 1] = entry
-
-	local storageKey = Analysis.GetDebuffStorageKey(entry)
-	if storageKey ~= nil then
-		runtime.activeDebuffsOnPlayer[storageKey] = entry.id
-	end
-
-	Analysis.IncrementPlayerStat("totalDebuffsApplied", 1)
-	Analysis.TrimDebuffHistory()
-	return entry
-end
-
-function Analysis.CreateDebuffHistoryEntryFromUnit(debuffInfo, tooltip, sourceName)
-	if type(debuffInfo) ~= "table" then
-		return nil
-	end
-
-	local debuffName = Analysis.GetDebuffDisplayNameFromInfo(debuffInfo)
-	if debuffName == "" then
-		debuffName = "Unknown Debuff"
-	end
-
-	sourceName = Trim(sourceName or "Unknown")
-	if sourceName == "" then
-		sourceName = "Unknown"
-	end
-
-	local entry = {
-		id = runtime.nextDebuffEventId,
-		name = debuffName,
-		source = sourceName,
-		buffId = Analysis.GetDebuffBuffId(debuffInfo),
-		appliedAt = RefreshClock(),
-		removedAt = nil,
-		durationSec = Analysis.NormalizeDebuffDurationSeconds(
-			debuffInfo.timeLeft or debuffInfo.time_left,
-			debuffInfo.timeUnit or debuffInfo.time_unit
-		),
-		actualDurationSec = nil,
-		stacks = tonumber(debuffInfo.stack or debuffInfo.stacks) or 1,
-		effects = Analysis.ExtractDebuffEffectsFromTooltip(tooltip),
-		refreshCount = 0,
-		active = true,
-		applyCount = 1,
-	}
-	runtime.nextDebuffEventId = runtime.nextDebuffEventId + 1
-	runtime.debuffHistory[#runtime.debuffHistory + 1] = entry
-
-	local storageKey = Analysis.GetDebuffStorageKey(entry)
-	if storageKey ~= nil then
-		runtime.activeDebuffsOnPlayer[storageKey] = entry.id
-	end
-
-	Analysis.TouchKillCombatActivity()
-	Analysis.IncrementPlayerStat("totalDebuffsApplied", 1)
-	Analysis.TrimDebuffHistory()
-	return entry
-end
-
-function Analysis.RecordPlayerDebuffApplied(msg, auraResult)
-	if not Analysis.IsPlayerDebuffAura(auraResult) then
-		return false
-	end
-
-	Analysis.TouchKillCombatActivity()
-	local debuffName = Analysis.ResolveDebuffDisplayName(msg, auraResult)
-	local buffId = nil
-	if type(auraResult) == "table" then
-		buffId = auraResult.buffId or auraResult.spellId
-	end
-
-	local snapshot = Analysis.FindPlayerDebuffSnapshot(debuffName, buffId)
-	Analysis.CreateDebuffHistoryEntry(msg, auraResult, snapshot)
-	return true
-end
-
-function Analysis.RecordPlayerDebuffRefresh(msg, auraResult, isDose)
-	if not Analysis.IsPlayerDebuffAura(auraResult) then
-		return false
-	end
-
-	Analysis.TouchKillCombatActivity()
-	local debuffName = Analysis.ResolveDebuffDisplayName(msg, auraResult)
-	local buffId = nil
-	if type(auraResult) == "table" then
-		buffId = auraResult.buffId or auraResult.spellId
-	end
-
-	local snapshot = Analysis.FindPlayerDebuffSnapshot(debuffName, buffId)
-	local storageKey = nil
-	if buffId ~= nil then
-		storageKey = "id:" .. tostring(buffId)
-	else
-		storageKey = "name:" .. NormalizeName(debuffName)
-	end
-
-	local entry = select(1, Analysis.FindDebuffHistoryEntry(storageKey, true))
-	if entry == nil then
-		Analysis.CreateDebuffHistoryEntry(msg, auraResult, snapshot)
-		return true
-	end
-
-	entry.refreshCount = (tonumber(entry.refreshCount) or 0) + 1
-	if isDose then
-		entry.applyCount = (tonumber(entry.applyCount) or 0) + 1
-	end
-	if type(snapshot) == "table" and type(snapshot.info) == "table" then
-		entry.stacks = tonumber(snapshot.info.stack or snapshot.info.stacks) or entry.stacks
-		entry.durationSec = Analysis.NormalizeDebuffDurationSeconds(
-			snapshot.info.timeLeft or snapshot.info.time_left,
-			snapshot.info.timeUnit or snapshot.info.time_unit
-		) or entry.durationSec
-		local effects = Analysis.ExtractDebuffEffectsFromTooltip(snapshot.tooltip)
-		if effects ~= "" then
-			entry.effects = effects
-		end
-	elseif type(auraResult) == "table" and tonumber(auraResult.stack) ~= nil then
-		entry.stacks = tonumber(auraResult.stack)
-	end
-
-	return true
-end
-
-function Analysis.RecordPlayerDebuffRemoved(msg, auraResult)
-	local debuffName = Analysis.ResolveDebuffDisplayName(msg, auraResult)
-	local buffId = nil
-	if type(auraResult) == "table" then
-		buffId = auraResult.buffId or auraResult.spellId
-	end
-
-	local storageKey = nil
-	if buffId ~= nil then
-		storageKey = "id:" .. tostring(buffId)
-	else
-		storageKey = "name:" .. NormalizeName(debuffName)
-	end
-
-	local entry = select(1, Analysis.FindDebuffHistoryEntry(storageKey, true))
-	if entry == nil and not Analysis.IsPlayerDebuffAura(auraResult) then
-		return false
-	end
-
-	Analysis.TouchKillCombatActivity()
-	local now = RefreshClock()
-	if entry ~= nil then
-		entry.active = false
-		entry.removedAt = now
-		local appliedAt = tonumber(entry.appliedAt) or now
-		entry.actualDurationSec = now - appliedAt
-		runtime.activeDebuffsOnPlayer[storageKey] = nil
-	else
-		runtime.debuffHistory[#runtime.debuffHistory + 1] = {
-			id = runtime.nextDebuffEventId,
-			name = debuffName,
-			source = Trim((msg and msg.sourceName) or "Unknown"),
-			buffId = buffId,
-			appliedAt = nil,
-			removedAt = now,
-			durationSec = nil,
-			actualDurationSec = nil,
-			stacks = tonumber(auraResult and auraResult.stack) or 1,
-			effects = "",
-			refreshCount = 0,
-			active = false,
-			applyCount = 0,
-		}
-		runtime.nextDebuffEventId = runtime.nextDebuffEventId + 1
-		Analysis.TrimDebuffHistory()
-	end
-
-	Analysis.IncrementPlayerStat("totalDebuffsRemoved", 1)
-	return true
-end
-
-function Analysis.HandlePlayerDebuffAuraMessage(msg, auraKind, auraResult)
-	if auraKind == "aura_applied" then
-		return Analysis.RecordPlayerDebuffApplied(msg, auraResult)
-	end
-	if auraKind == "aura_dose" then
-		return Analysis.RecordPlayerDebuffRefresh(msg, auraResult, true)
-	end
-	if auraKind == "aura_refresh" then
-		return Analysis.RecordPlayerDebuffRefresh(msg, auraResult, false)
-	end
-	if auraKind == "aura_removed" then
-		return Analysis.RecordPlayerDebuffRemoved(msg, auraResult)
-	end
-	return false
-end
-
-function Analysis.SyncActivePlayerDebuffsFromUnit()
-	if X2Unit == nil then
-		return false
-	end
-
-	local okCount, debuffCount = SafeCall(X2Unit, "UnitDeBuffCount", "player")
-	debuffCount = okCount and tonumber(debuffCount) or 0
-	local seenKeys = {}
-	local changed = false
-
-	for index = 1, debuffCount do
-		local okInfo, debuffInfo = SafeCall(X2Unit, "UnitDeBuff", "player", index)
-		if okInfo and type(debuffInfo) == "table" then
-			local storageKey = Analysis.GetDebuffStorageKeyFromInfo(debuffInfo)
-			if storageKey ~= nil then
-				seenKeys[storageKey] = true
-				local okTooltip, tooltip = SafeCall(X2Unit, "UnitDeBuffTooltip", "player", index)
-				local entry = select(1, Analysis.FindDebuffHistoryEntry(storageKey, true))
-				if entry == nil then
-					Analysis.CreateDebuffHistoryEntryFromUnit(
-						debuffInfo,
-						okTooltip and tooltip or nil,
-						Analysis.ResolveDebuffSourceName()
-					)
-					changed = true
-				else
-					local nextStacks = tonumber(debuffInfo.stack or debuffInfo.stacks) or entry.stacks
-					local nextDuration = Analysis.NormalizeDebuffDurationSeconds(
-						debuffInfo.timeLeft or debuffInfo.time_left,
-						debuffInfo.timeUnit or debuffInfo.time_unit
-					) or entry.durationSec
-					if nextStacks ~= entry.stacks or nextDuration ~= entry.durationSec then
-						changed = true
-					end
-					entry.stacks = nextStacks
-					entry.durationSec = nextDuration
-					if okTooltip then
-						local effects = Analysis.ExtractDebuffEffectsFromTooltip(tooltip)
-						if effects ~= "" and effects ~= entry.effects then
-							entry.effects = effects
-							changed = true
-						end
-					end
-				end
-			end
-		end
-	end
-
-	for storageKey, entryId in pairs(runtime.activeDebuffsOnPlayer) do
-		if seenKeys[storageKey] ~= true then
-			local entry = select(1, Analysis.FindDebuffHistoryEntry(storageKey, true))
-			if entry ~= nil and entry.id == entryId then
-				entry.active = false
-				entry.removedAt = RefreshClock()
-				local appliedAt = tonumber(entry.appliedAt) or RefreshClock()
-				entry.actualDurationSec = RefreshClock() - appliedAt
-				changed = true
-			end
-			runtime.activeDebuffsOnPlayer[storageKey] = nil
-		end
-	end
-
-	if changed then
-		Analysis.MarkSessionDataSavePending()
-	end
-	return changed
-end
-
-function Analysis.CountActivePlayerDebuffs()
-	local count = 0
-	for _, entryId in pairs(runtime.activeDebuffsOnPlayer) do
-		if entryId ~= nil then
-			count = count + 1
-		end
-	end
-	return count
-end
-
-function Analysis.FormatDebuffAnalysisLine(entry, includeRemaining)
-	if type(entry) ~= "table" then
-		return "  Unknown debuff"
-	end
-
-	local durationText
-	if includeRemaining == true and entry.active == true then
-		durationText = "left " .. Analysis.FormatDebuffDurationSeconds(entry.durationSec)
-	elseif entry.actualDurationSec ~= nil then
-		durationText = "lasted " .. Analysis.FormatDebuffDurationSeconds(entry.actualDurationSec)
-	elseif entry.durationSec ~= nil then
-		durationText = "for " .. Analysis.FormatDebuffDurationSeconds(entry.durationSec)
-	else
-		durationText = "duration unknown"
-	end
-
-	local stackText = ""
-	local stacks = tonumber(entry.stacks) or 0
-	if stacks > 1 then
-		stackText = " x" .. tostring(stacks)
-	end
-
-	local applyText = ""
-	local applyCount = tonumber(entry.applyCount) or 0
-	if applyCount > 1 then
-		applyText = " (" .. tostring(applyCount) .. " applies)"
-	end
-
-	local refreshText = ""
-	local refreshCount = tonumber(entry.refreshCount) or 0
-	if refreshCount > 0 then
-		refreshText = " refreshed " .. tostring(refreshCount) .. "x"
-	end
-
-	local effectText = ""
-	if Trim(entry.effects or "") ~= "" then
-		effectText = " | " .. Analysis.TruncateText(entry.effects, 36)
-	end
-
-	return string.format(
-		"  %-16s %-12s %s%s%s%s%s",
-		Analysis.TruncateText(entry.name or "Unknown", 16),
-		Analysis.TruncateText(entry.source or "Unknown", 12),
-		durationText,
-		stackText,
-		applyText,
-		refreshText,
-		effectText
-	)
-end
-
-function Analysis.AddDebuffEffectDetailLine(lines, entry)
-	local effects = Trim((entry and entry.effects) or "")
-	if effects == "" or string.len(effects) <= 36 then
-		return
-	end
-	Analysis.AddViewLine(lines, "metric", "    Effect: " .. Analysis.TruncateText(effects, 72))
-end
-
 function Analysis.RecordDpsReviewCombatMessage(msg)
 	if type(msg) ~= "table" then
 		return false
 	end
 	local auraKind = Analysis.GetCombatAuraEventKind(msg.eventType)
 	if auraKind ~= nil then
-		if Analysis.IsLocalPlayerTarget(msg) then
-			local auraResult = Analysis.ParseGameCombatAuraResult(msg)
-			local recordedAura = Analysis.HandlePlayerDebuffAuraMessage(msg, auraKind, auraResult)
-			if recordedAura then
-				Analysis.MarkSessionDataSavePending()
-				if RefreshViewWindowIfVisible ~= nil then
-					RefreshViewWindowIfVisible()
-				end
-			end
-			return recordedAura
-		end
 		return false
 	end
 	if msg.sourceName == "" or msg.targetName == "" then
@@ -2305,7 +2159,6 @@ function Analysis.RecordDpsReviewCombatMessage(msg)
 		recorded = IsLocalPlayerName(msg.sourceName)
 	end
 	if recorded then
-		Analysis.TouchKillCombatActivity()
 		Analysis.MarkSessionDataSavePending()
 	end
 	if recorded and RefreshViewWindowIfVisible ~= nil then
@@ -3028,96 +2881,12 @@ function Analysis.AttributeExpGain(amount)
 	end
 	runtime.totalExpGained = (tonumber(runtime.totalExpGained) or 0) + amount
 	Analysis.AddAmount(runtime.expByUnit, Analysis.GetRecentMobName(EXP_ATTRIBUTION_SECONDS), amount)
+	Analysis.ApplyExpToRecentKill(amount)
 	Analysis.MarkSessionDataSavePending()
 	if RefreshViewWindowIfVisible ~= nil then
 		RefreshViewWindowIfVisible()
 	end
 	return true
-end
-
-Analysis.EXP_CURRENT_FIELDS = {
-	"current",
-	"cur",
-	"currentExp",
-	"curExp",
-	"exp",
-	"value",
-	"now",
-}
-
-Analysis.EXP_MAX_FIELDS = {
-	"max",
-	"maximum",
-	"maxExp",
-	"nextExp",
-	"requiredExp",
-	"requireExp",
-	"total",
-}
-
-Analysis.EXP_LEVEL_FIELDS = {
-	"level",
-	"lv",
-	"playerLevel",
-}
-
-function Analysis.BuildExpSnapshot(firstValue, secondValue, thirdValue)
-	local snapshot = {
-		current = nil,
-		max = nil,
-		level = nil,
-	}
-	if type(firstValue) == "table" then
-		snapshot.current = Analysis.ExtractFieldNumber(firstValue, Analysis.EXP_CURRENT_FIELDS) or tonumber(firstValue[1])
-		snapshot.max = Analysis.ExtractFieldNumber(firstValue, Analysis.EXP_MAX_FIELDS) or tonumber(firstValue[2])
-		snapshot.level = Analysis.ExtractFieldNumber(firstValue, Analysis.EXP_LEVEL_FIELDS) or tonumber(firstValue[3])
-	else
-		snapshot.current = tonumber(firstValue)
-		snapshot.max = tonumber(secondValue)
-		snapshot.level = tonumber(thirdValue)
-	end
-	if snapshot.current == nil then
-		return nil
-	end
-	return snapshot
-end
-
-function Analysis.ReadExpSnapshot()
-	local ok, firstValue, secondValue, thirdValue = SafeCallValues(X2Player, "GetExpInfo")
-	if not ok and _G ~= nil and type(_G.GetExpInfo) == "function" then
-		ok, firstValue, secondValue, thirdValue = pcall(_G.GetExpInfo)
-	end
-	if not ok then
-		return nil
-	end
-	return Analysis.BuildExpSnapshot(firstValue, secondValue, thirdValue)
-end
-
-function Analysis.SyncExpGained()
-	local snapshot = Analysis.ReadExpSnapshot()
-	if snapshot == nil then
-		return false
-	end
-
-	local last = runtime.lastExpSnapshot
-	local recorded = false
-	if last ~= nil and tonumber(last.current) ~= nil then
-		local gained = nil
-		if snapshot.level ~= nil and last.level ~= nil and snapshot.level > last.level then
-			gained = 0
-			if last.max ~= nil and last.max >= last.current then
-				gained = gained + (last.max - last.current)
-			end
-			gained = gained + snapshot.current
-		elseif snapshot.current >= last.current then
-			gained = snapshot.current - last.current
-		end
-		if gained ~= nil and gained > 0 then
-			recorded = Analysis.AttributeExpGain(gained) or recorded
-		end
-	end
-	runtime.lastExpSnapshot = snapshot
-	return recorded
 end
 
 Analysis.EXP_DELTA_FIELDS = {
@@ -3183,10 +2952,6 @@ function Analysis.ExtractExpDeltaFromEvent(...)
 end
 
 function Analysis.HandleExpChangedEvent(...)
-	if Analysis.SyncExpGained() then
-		return
-	end
-
 	local amount = Analysis.ExtractExpDeltaFromEvent(...)
 	if amount ~= nil then
 		Analysis.AttributeExpGain(amount)
@@ -3211,7 +2976,6 @@ end
 
 function Analysis.SyncSessionResourceSnapshots()
 	Analysis.SyncManaSpent()
-	Analysis.SyncExpGained()
 	Analysis.SyncMoneyEarned()
 end
 
@@ -3235,7 +2999,6 @@ function Analysis.RecordSessionDamage(sourceName, targetName, damageAmount)
 		sourceName = Trim(sourceName)
 		Analysis.AddAmount(runtime.damageTakenByUnit, sourceName, damageAmount)
 		runtime.totalDamageTaken = (tonumber(runtime.totalDamageTaken) or 0) + damageAmount
-		Analysis.TouchKillCombatActivity()
 		recorded = true
 	end
 	if recorded then
@@ -3246,11 +3009,102 @@ function Analysis.RecordSessionDamage(sourceName, targetName, damageAmount)
 	end
 end
 
+function Analysis.GetLocalPlayerCounterName(fallback)
+	local playerName = GetLocalPlayerName()
+	if IsValidName(playerName) then
+		return StripWorldSuffix(playerName)
+	end
+	if IsValidName(fallback) and NormalizeName(fallback) ~= "you" then
+		return StripWorldSuffix(fallback)
+	end
+	return "You"
+end
+
+function Analysis.ApplyCounterRowStyle(row, mobName)
+	if row == nil or row.style == nil then
+		return
+	end
+	if mobName ~= nil and Analysis.IsPlayerDeathCounterName(mobName) then
+		row.style:SetColor(1, 0.25, 0.25, 1)
+	else
+		row.style:SetColor(1, 1, 1, 1)
+	end
+end
+
+function Analysis.ResolveLocalPlayerDeathKillerName(fallback)
+	if IsValidName(fallback) and not IsLocalPlayerName(fallback) then
+		return Trim(fallback)
+	end
+	if type(runtime.lastDamageTaken) == "table" then
+		local sourceName = Trim(runtime.lastDamageTaken.sourceName or "")
+		local takenAt = tonumber(runtime.lastDamageTaken.time) or 0
+		if sourceName ~= "" and not IsLocalPlayerName(sourceName) and RefreshClock() - takenAt <= 12 then
+			return sourceName
+		end
+	end
+	return "Unknown"
+end
+
+-- Player deaths can arrive through a death event, a combat death message, or
+-- health polling. Track alive/dead state so the same death only increments once.
+function Analysis.ResetLocalPlayerDeathTracking()
+	local health = SafeUnitValue("UnitHealth", "player")
+	runtime.localPlayerLastHealth = health
+	runtime.localPlayerWasAlive = health == nil or health > 0
+	runtime.localPlayerDeathCounted = health ~= nil and health <= 0
+end
+
+function Analysis.SyncLocalPlayerDeathState()
+	local health = SafeUnitValue("UnitHealth", "player")
+	if health == nil then
+		return nil
+	end
+	runtime.localPlayerLastHealth = health
+	if health > 0 then
+		runtime.localPlayerWasAlive = true
+		runtime.localPlayerDeathCounted = false
+	else
+		if runtime.localPlayerWasAlive == true and runtime.localPlayerDeathCounted ~= true then
+			Analysis.CountLocalPlayerDeath(Analysis.ResolveLocalPlayerDeathKillerName())
+		else
+			runtime.localPlayerWasAlive = false
+		end
+	end
+	return health
+end
+
+function Analysis.ExtractAlliedPlayerDeathName(...)
+	for index = 1, select("#", ...) do
+		local value = select(index, ...)
+		if type(value) == "string" then
+			local name = Analysis.ResolveAlliedPlayerDeathName(value)
+			if name ~= nil then
+				return name
+			end
+		elseif type(value) == "table" then
+			local name = Analysis.ExtractAlliedPlayerDeathName(
+				value.unit,
+				value.unitId,
+				value.unitName,
+				value.name,
+				value.deadName,
+				value.deadUnitName,
+				value.targetName
+			)
+			if name ~= nil then
+				return name
+			end
+		end
+	end
+	return nil
+end
+
 function Analysis.ClearSessionStats()
 	runtime.sessionKillCounts = {}
 	runtime.damageDealtByUnit = {}
 	runtime.damageTakenByUnit = {}
 	runtime.damageBySkill = {}
+	runtime.skillUsageByName = {}
 	runtime.damageByCategory = {}
 	runtime.damageByElement = {}
 	runtime.healBySkill = {}
@@ -3263,6 +3117,7 @@ function Analysis.ClearSessionStats()
 	runtime.playerCombatStats = {}
 	runtime.itemDropsByUnit = {}
 	runtime.expByUnit = {}
+	runtime.recentKillExpValues = {}
 	runtime.totalDamageDealt = 0
 	runtime.totalDamageTaken = 0
 	runtime.totalDroppedItems = 0
@@ -3270,6 +3125,7 @@ function Analysis.ClearSessionStats()
 	runtime.totalGoldEarned = 0
 	runtime.totalManaSpent = 0
 	runtime.totalKillTime = 0
+	runtime.sessionStartTime = RefreshClock()
 	runtime.combatActive = false
 	runtime.combatStart = nil
 	runtime.lastCombatActivity = nil
@@ -3279,18 +3135,15 @@ function Analysis.ClearSessionStats()
 	runtime.lastBagSnapshot = nil
 	runtime.pendingBagSyncUntil = nil
 	runtime.localPlayerName = nil
+	runtime.recentPlayerDeathTimes = {}
+	Analysis.ResetLocalPlayerDeathTracking()
 	runtime.lastPlayerMana = nil
-	runtime.lastExpSnapshot = nil
 	runtime.lastMoneySnapshot = nil
 	runtime.lastMoneyEarnedAmount = nil
 	runtime.lastMoneyEarnedTime = nil
 	runtime.lastMoneyEarnedSource = nil
 	runtime.lastDamage = nil
 	runtime.lastDamageTaken = nil
-	runtime.debuffHistory = {}
-	runtime.activeDebuffsOnPlayer = {}
-	runtime.nextDebuffEventId = 1
-	runtime.debuffSyncElapsed = 0
 	runtime.savePending = false
 	runtime.pendingSaveEvents = 0
 	runtime.saveElapsed = 0
@@ -3316,6 +3169,7 @@ local function CountKill(mobName, killerName)
 	CaptureSessionActivityLocation()
 	runtime.killCounts[mobName] = (tonumber(runtime.killCounts[mobName]) or 0) + 1
 	runtime.sessionKillCounts[mobName] = (tonumber(runtime.sessionKillCounts[mobName]) or 0) + 1
+	Analysis.AddRecentKillExpEntry(mobName)
 	Analysis.RecordKillLocation(mobName, killerName)
 	if runtime.killerCounts[mobName] == nil then
 		runtime.killerCounts[mobName] = {}
@@ -3337,6 +3191,65 @@ local function CountKill(mobName, killerName)
 	if RefreshViewWindowIfVisible ~= nil then
 		RefreshViewWindowIfVisible()
 	end
+end
+
+function Analysis.CountLocalPlayerDeath(killerName)
+	if runtime.localPlayerDeathCounted == true then
+		return false
+	end
+	runtime.localPlayerDeathCounted = true
+	runtime.localPlayerWasAlive = false
+	runtime.localPlayerLastHealth = 0
+	local playerName = Analysis.GetLocalPlayerCounterName()
+	Analysis.MarkPlayerDeathCounterName(playerName)
+	CountKill(playerName, Analysis.ResolveLocalPlayerDeathKillerName(killerName))
+	return true
+end
+
+function Analysis.CountAlliedPlayerDeath(playerName, killerName)
+	if not IsValidName(playerName) then
+		return false
+	end
+	if Trim(playerName) == "player" then
+		return Analysis.CountLocalPlayerDeath(killerName)
+	end
+	if IsLocalPlayerName(playerName) then
+		return Analysis.CountLocalPlayerDeath(killerName)
+	end
+	if not Analysis.IsAlliedPlayerName(playerName) then
+		return false
+	end
+
+	playerName = StripWorldSuffix(playerName)
+	local key = Analysis.GetPlayerNameKey(playerName)
+	if key == nil then
+		return false
+	end
+	local now = RefreshClock()
+	local lastDeathTime = tonumber(runtime.recentPlayerDeathTimes[key])
+	if lastDeathTime ~= nil and now - lastDeathTime <= Analysis.PLAYER_DEATH_DEDUPE_SECONDS then
+		return false
+	end
+	runtime.recentPlayerDeathTimes[key] = now
+	Analysis.MarkPlayerDeathCounterName(playerName)
+	CountKill(playerName, IsValidName(killerName) and Trim(killerName) or "Unknown")
+	return true
+end
+
+function Analysis.TryCountLocalPlayerDeath(killerName)
+	if runtime.localPlayerDeathCounted == true then
+		return false
+	end
+	local health = SafeUnitValue("UnitHealth", "player")
+	if health == nil then
+		return false
+	end
+	runtime.localPlayerLastHealth = health
+	if health > 0 then
+		runtime.localPlayerWasAlive = true
+		return false
+	end
+	return Analysis.CountLocalPlayerDeath(killerName)
 end
 
 local function CountSnapshotKill(snapshot, mobName, killerName)
@@ -3694,6 +3607,11 @@ local function IsDamageCombatEvent(eventType)
 	return type(eventType) == "string" and string.find(eventType, "DAMAGE", 1, true) ~= nil
 end
 
+local function IsCombatDeathEvent(eventType)
+	eventType = tostring(eventType or "")
+	return string.find(eventType, "DEAD", 1, true) ~= nil or string.find(eventType, "DIED", 1, true) ~= nil
+end
+
 local function NormalizeDamageAmount(value)
 	local amount = tonumber(value)
 	if amount == nil then
@@ -3869,6 +3787,12 @@ local function HandleCombatMessage(...)
 	local sourceName = msg.sourceName
 	local targetName = msg.targetName
 	local damageAmount = GetCombatDamageAmount(eventType, msg.abilityId, msg.effectType)
+	if IsCombatDeathEvent(eventType) then
+		if Analysis.IsAlliedPlayerName(targetName) then
+			Analysis.CountAlliedPlayerDeath(targetName, sourceName)
+		end
+		return
+	end
 	if string.find(tostring(eventType or ""), "MONEY", 1, true) ~= nil then
 		if runtime.playerMoneyHandlerRegistered == true then
 			return
@@ -3890,6 +3814,10 @@ local function HandleCombatMessage(...)
 	end
 
 	Analysis.RecordSessionDamage(sourceName, targetName, damageAmount)
+	if IsLocalPlayerName(targetName) and not IsLocalPlayerName(sourceName) then
+		Analysis.TryCountLocalPlayerDeath(sourceName)
+		return
+	end
 	local targetKey = NormalizeTrimmedName(targetName)
 	runtime.recentDamageByTarget[targetKey] = {
 		sourceName = sourceName,
@@ -3922,6 +3850,8 @@ end
 local function ClearKillCounts()
 	runtime.killCounts = {}
 	runtime.killerCounts = {}
+	runtime.playerDeathCounterNames = {}
+	runtime.recentPlayerDeathTimes = {}
 	runtime.lastKill = nil
 	runtime.currentPage = 1
 	runtime.recentDamageByTarget = {}
@@ -3938,8 +3868,10 @@ end
 
 LoadSessionHistory()
 LoadKillCounts()
+Analysis.EnsureSessionStartTime(RefreshClock())
 LoadCounterSettings()
 Analysis.SyncSessionResourceSnapshots()
+Analysis.ResetLocalPlayerDeathTracking()
 Analysis.SyncBagDrops(true)
 
 local windowX, windowY = LoadPosition(WINDOW_POSITION_KEY, 420, 318)
@@ -4566,7 +4498,12 @@ UpdateCounterWindow = function()
 	local totalPages = ClampCurrentPage(#names)
 	local startIndex = ((runtime.currentPage - 1) * PAGE_SIZE) + 1
 
-	titleLabel:SetText("Kill Counter: " .. tostring(GetTotalKillCount()))
+	titleLabel:SetText(
+		"Kill Counter: "
+			.. tostring(GetTotalKillCount())
+			.. " | KPM "
+			.. Analysis.FormatPerMinute(Analysis.GetKillsPerMinute(RefreshClock()))
+	)
 
 	if runtime.lastKill ~= nil and runtime.lastKill.mobName ~= nil then
 		statusLabel:SetText("Last: " .. tostring(runtime.lastKill.killerName or "Unknown") .. " -> " .. tostring(runtime.lastKill.mobName))
@@ -4579,8 +4516,10 @@ UpdateCounterWindow = function()
 		local row = runtime.rows[rowIndex]
 		if mobName == nil then
 			row:SetText("")
+			Analysis.ApplyCounterRowStyle(row, nil)
 		else
 			row:SetText(mobName .. ": " .. tostring(runtime.killCounts[mobName] or 0))
+			Analysis.ApplyCounterRowStyle(row, mobName)
 		end
 	end
 
@@ -4661,6 +4600,22 @@ function Analysis.GetSessionKillTotal()
 		end
 	end
 	return total
+end
+
+function Analysis.GetKillsPerMinute(now)
+	local elapsed = Analysis.GetSessionElapsedSeconds(now or RefreshClock())
+	if elapsed <= 0 then
+		return 0
+	end
+	return Analysis.GetSessionKillTotal() / (elapsed / 60)
+end
+
+function Analysis.GetExpPerMinute(now)
+	local elapsed = Analysis.GetSessionElapsedSeconds(now or RefreshClock())
+	if elapsed <= 0 then
+		return 0
+	end
+	return (tonumber(runtime.totalExpGained) or 0) / (elapsed / 60)
 end
 
 function Analysis.AddReportName(names, seen, name)
@@ -4908,6 +4863,68 @@ function Analysis.CleanAbilityDisplayName(skillKey, entry)
 	return displayName
 end
 
+function Analysis.AddSkillUsageSnapshotAmount(snapshot, name, count)
+	name = Trim(name or "")
+	count = tonumber(count) or 0
+	if name == "" or count <= 0 then
+		return
+	end
+	local entry = snapshot[name]
+	if type(entry) ~= "table" then
+		entry = {
+			name = name,
+			count = 0,
+		}
+		snapshot[name] = entry
+	end
+	entry.count = (tonumber(entry.count) or 0) + count
+end
+
+-- Saved data now stores direct skill-use counts. Older sessions can still show
+-- a ranking by rebuilding usage from damage/heal/miss/resource breakdowns.
+function Analysis.BuildSkillUsageSnapshot()
+	local snapshot = {}
+	local hasDirectUsage = false
+	for skillName, entry in pairs(runtime.skillUsageByName or {}) do
+		if type(entry) == "table" then
+			local count = tonumber(entry.count) or 0
+			if count > 0 then
+				Analysis.AddSkillUsageSnapshotAmount(snapshot, entry.name or skillName, count)
+				hasDirectUsage = true
+			end
+		end
+	end
+	if hasDirectUsage then
+		return snapshot
+	end
+
+	for skillKey, entry in pairs(runtime.damageBySkill or {}) do
+		Analysis.AddSkillUsageSnapshotAmount(snapshot, Analysis.CleanAbilityDisplayName(skillKey, entry), tonumber(entry.hits) or 0)
+	end
+	for skillKey, entry in pairs(runtime.healBySkill or {}) do
+		Analysis.AddSkillUsageSnapshotAmount(snapshot, Analysis.CleanAbilityDisplayName(skillKey, entry), tonumber(entry.hits) or 0)
+	end
+	for skillKey, entry in pairs(runtime.missesBySkill or {}) do
+		Analysis.AddSkillUsageSnapshotAmount(snapshot, Analysis.CleanAbilityDisplayName(skillKey, entry), tonumber(entry.count) or 0)
+	end
+	for skillKey, entry in pairs(runtime.energizeBySkill or {}) do
+		Analysis.AddSkillUsageSnapshotAmount(snapshot, Analysis.CleanAbilityDisplayName(skillKey, entry), tonumber(entry.hits) or 0)
+	end
+	return snapshot
+end
+
+function Analysis.BuildSortedSkillUsageKeys(snapshot)
+	local amountsByKey = {}
+	snapshot = snapshot or Analysis.BuildSkillUsageSnapshot()
+	for skillName, entry in pairs(snapshot) do
+		local count = tonumber(entry.count) or 0
+		if count > 0 then
+			amountsByKey[skillName] = count
+		end
+	end
+	return Analysis.BuildSortedAmountKeys(amountsByKey)
+end
+
 function Analysis.FormatSkillAnalysisLine(name, amount, hits, percentText)
 	hits = tonumber(hits) or 0
 	local average = 0
@@ -4956,8 +4973,8 @@ function Analysis.AppendCombatReviewLines(lines)
 	local misses = tonumber(stats.totalMisses) or 0
 	local damageTaken = tonumber(stats.totalDamageTaken) or 0
 	local healingReceived = tonumber(stats.totalHealingReceived) or 0
-	local debuffHistoryCount = #(runtime.debuffHistory or {})
-	local activeDebuffCount = Analysis.CountActivePlayerDebuffs()
+	local skillUsageSnapshot = Analysis.BuildSkillUsageSnapshot()
+	local skillUsageKeys = Analysis.BuildSortedSkillUsageKeys(skillUsageSnapshot)
 	if damageTaken < (tonumber(runtime.totalDamageTaken) or 0) then
 		damageTaken = tonumber(runtime.totalDamageTaken) or 0
 	end
@@ -4967,8 +4984,7 @@ function Analysis.AppendCombatReviewLines(lines)
 		and misses <= 0
 		and damageTaken <= 0
 		and healingReceived <= 0
-		and debuffHistoryCount <= 0
-		and activeDebuffCount <= 0
+		and #skillUsageKeys == 0
 		and #energizeKeys == 0
 	then
 		return true
@@ -5022,22 +5038,29 @@ function Analysis.AppendCombatReviewLines(lines)
 				.. Analysis.FormatDamage(healingReceived)
 			)
 	end
-	if debuffHistoryCount > 0 or activeDebuffCount > 0 then
-		local debuffsApplied = tonumber(stats.totalDebuffsApplied) or debuffHistoryCount
-		Analysis.AddViewLine(
-			lines,
-			"debuff",
-			"  Debuffs "
-				.. tostring(debuffsApplied)
-				.. " applied"
-				.. (activeDebuffCount > 0 and (" | " .. tostring(activeDebuffCount) .. " active") or "")
-				.. (debuffHistoryCount > activeDebuffCount and (" | " .. tostring(debuffHistoryCount - activeDebuffCount) .. " ended") or "")
-		)
-	end
-
 	local categoryText = Analysis.BuildCompactBreakdown(runtime.damageByCategory, totalDamage, 4)
 	if categoryText ~= "" then
 		Analysis.AddViewLine(lines, "category", Analysis.TruncateText("  Sources: " .. categoryText, 100))
+	end
+
+	if #skillUsageKeys > 0 then
+		Analysis.AddViewLine(lines, "header", "Skills Used")
+		for skillIndex, skillName in ipairs(skillUsageKeys) do
+			if skillIndex > 6 then
+				Analysis.AddViewLine(lines, "metric", "  ... +" .. tostring(#skillUsageKeys - 6) .. " more skills")
+				break
+			end
+			local entry = skillUsageSnapshot[skillName] or {}
+			Analysis.AddViewLine(
+				lines,
+				"skill",
+				string.format(
+					"  %-24s %6s uses",
+					Analysis.TruncateText(entry.name or skillName, 24),
+					Analysis.FormatAmount(entry.count)
+				)
+			)
+		end
 	end
 
 	local skillKeys = Analysis.BuildSortedEntryKeys(runtime.damageBySkill, "damage")
@@ -5111,56 +5134,6 @@ function Analysis.AppendCombatReviewLines(lines)
 		end
 	end
 
-	if debuffHistoryCount > 0 or activeDebuffCount > 0 then
-		Analysis.AddViewLine(lines, "header", "Debuffs on You")
-		Analysis.AddViewLine(lines, "metric", "  Debuff            Source       Duration / Effect")
-
-		local activeShown = 0
-		if activeDebuffCount > 0 then
-			Analysis.AddViewLine(lines, "metric", "  Active:")
-			for storageKey, entryId in pairs(runtime.activeDebuffsOnPlayer) do
-				if activeShown >= Analysis.DEBUFF_VIEW_LIMIT then
-					break
-				end
-				local entry = select(1, Analysis.FindDebuffHistoryEntry(storageKey, true))
-				if entry ~= nil and entry.id == entryId then
-					Analysis.AddViewLine(lines, "debuff", Analysis.FormatDebuffAnalysisLine(entry, true))
-					Analysis.AddDebuffEffectDetailLine(lines, entry)
-					activeShown = activeShown + 1
-				end
-			end
-		end
-
-		local historyShown = 0
-		local endedCount = 0
-		for index = #runtime.debuffHistory, 1, -1 do
-			local entry = runtime.debuffHistory[index]
-			if type(entry) == "table" and entry.active ~= true then
-				endedCount = endedCount + 1
-			end
-		end
-		if endedCount > 0 then
-			if activeShown > 0 then
-				Analysis.AddViewLine(lines, "spacer", "")
-			end
-			Analysis.AddViewLine(lines, "metric", "  Recently Ended:")
-			for index = #runtime.debuffHistory, 1, -1 do
-				if historyShown >= Analysis.DEBUFF_VIEW_LIMIT then
-					break
-				end
-				local entry = runtime.debuffHistory[index]
-				if type(entry) == "table" and entry.active ~= true then
-					Analysis.AddViewLine(lines, "warning", Analysis.FormatDebuffAnalysisLine(entry, false))
-					Analysis.AddDebuffEffectDetailLine(lines, entry)
-					historyShown = historyShown + 1
-				end
-			end
-		end
-
-		if activeShown + historyShown < activeDebuffCount + endedCount then
-			Analysis.AddViewLine(lines, "metric", "  ... additional debuff events not shown")
-		end
-	end
 	return true
 end
 
@@ -5178,9 +5151,9 @@ Analysis.VIEW_LINE_COLORS = {
 	category = { 0.85, 0.78, 0.65, 1 },
 	skill = { 1, 1, 1, 1 },
 	heal = { 0.55, 0.95, 0.75, 1 },
-	debuff = { 0.92, 0.55, 0.82, 1 },
 	target = { 0.92, 0.92, 0.92, 1 },
 	unit = { 1, 1, 1, 1 },
+	player_death = { 1, 0.25, 0.25, 1 },
 	drop = { 0.78, 0.80, 0.84, 1 },
 	warning = { 1, 0.52, 0.48, 1 },
 	spacer = { 0.5, 0.5, 0.5, 0 },
@@ -5209,6 +5182,7 @@ end
 
 function Analysis.BuildViewDisplayLines()
 	local lines = {}
+	local now = RefreshClock()
 	local unitNames = Analysis.BuildSortedReportUnitNames()
 	local sessionKills = Analysis.GetSessionKillTotal()
 	local totalDamageDealt = tonumber(runtime.totalDamageDealt) or 0
@@ -5217,15 +5191,18 @@ function Analysis.BuildViewDisplayLines()
 	local totalGoldEarned = tonumber(runtime.totalGoldEarned) or 0
 	local totalManaSpent = tonumber(runtime.totalManaSpent) or 0
 	local totalDroppedItems = tonumber(runtime.totalDroppedItems) or 0
-	local totalKillTime = Analysis.GetKillCombatDuration(RefreshClock())
+	local sessionElapsed = Analysis.GetSessionElapsedSeconds(now)
+	local totalKillTime = Analysis.GetKillCombatDuration(now)
+	local killsPerMinute = Analysis.GetKillsPerMinute(now)
+	local expPerMinute = Analysis.GetExpPerMinute(now)
+	local averageExpPerKill = Analysis.GetAverageExpPerKill(now)
+	local distanceTraveled = Analysis.GetSessionDistanceTraveled()
 	local playerCombatStats = Analysis.EnsurePlayerCombatStats()
 	local totalCombatDamage = Analysis.GetPlayerDamageTotal()
 	local totalHealing = Analysis.GetPlayerHealTotal()
 	local totalMisses = tonumber(playerCombatStats.totalMisses) or 0
 	local totalHealingReceived = tonumber(playerCombatStats.totalHealingReceived) or 0
 	local energizeKeys = Analysis.BuildSortedEntryKeys(runtime.energizeBySkill, "amount")
-	local debuffHistoryCount = #(runtime.debuffHistory or {})
-	local activeDebuffCount = Analysis.CountActivePlayerDebuffs()
 
 	if #unitNames == 0
 		and sessionKills <= 0
@@ -5236,12 +5213,11 @@ function Analysis.BuildViewDisplayLines()
 		and totalMisses <= 0
 		and totalHealingReceived <= 0
 		and #energizeKeys == 0
-		and debuffHistoryCount <= 0
-		and activeDebuffCount <= 0
 		and totalExpGained <= 0
 		and totalGoldEarned <= 0
 		and totalManaSpent <= 0
 		and totalDroppedItems <= 0
+		and distanceTraveled <= 0
 	then
 		Analysis.AddViewLine(lines, "unit", "  No session data recorded yet.")
 		Analysis.AddViewLine(lines, "metric", "  Kill mobs or loot items, then open View again.")
@@ -5249,45 +5225,51 @@ function Analysis.BuildViewDisplayLines()
 	end
 
 	Analysis.AddViewLine(lines, "header", "Session Totals")
-	Analysis.AddViewLine(lines, "session_kills", "  Session Kills " .. Analysis.FormatAmount(sessionKills))
-	Analysis.AddViewLine(lines, "time", "  Time " .. Analysis.FormatDuration(totalKillTime))
+	Analysis.AddViewLine(
+		lines,
+		"session_kills",
+		"  Session Kills " .. Analysis.FormatAmount(sessionKills) .. " | KPM " .. Analysis.FormatPerMinute(killsPerMinute)
+	)
+	Analysis.AddViewLine(lines, "time", "  Session Time " .. Analysis.FormatDuration(sessionElapsed))
+	Analysis.AddViewLine(lines, "time", "  Kill Time " .. Analysis.FormatDuration(totalKillTime))
+	Analysis.AddViewLine(lines, "metric", "  Distance " .. Analysis.FormatDistanceMeters(distanceTraveled))
 	Analysis.AddViewLine(lines, "mana", "  Mana " .. Analysis.FormatAmount(totalManaSpent))
-	Analysis.AddViewLine(lines, "exp", "  EXP " .. Analysis.FormatAmount(totalExpGained))
+	Analysis.AddViewLine(
+		lines,
+		"exp",
+		"  EXP " .. Analysis.FormatCompactAmount(totalExpGained) .. " | EXP/m " .. Analysis.FormatPerMinute(expPerMinute)
+	)
+	Analysis.AddViewLine(
+		lines,
+		"exp",
+		"  AEK " .. Analysis.FormatCompactAmount(averageExpPerKill)
+	)
 	Analysis.AddViewLine(
 		lines,
 		"money",
 		"  " .. Analysis.FormatMoneyCopper(totalGoldEarned),
 		Analysis.BuildMoneyLineSegments(totalGoldEarned)
 	)
-	Analysis.AddViewLine(lines, "damage", "  Damage " .. Analysis.FormatAmount(totalDamageDealt))
-	Analysis.AddViewLine(lines, "damage_taken", "  Damage Taken " .. Analysis.FormatAmount(totalDamageTaken))
+	Analysis.AddViewLine(lines, "damage", "  Damage " .. Analysis.FormatCompactAmount(totalDamageDealt))
+	Analysis.AddViewLine(lines, "damage_taken", "  Damage Taken " .. Analysis.FormatCompactAmount(totalDamageTaken))
 	Analysis.AddViewLine(lines, "items", "  Items " .. Analysis.FormatAmount(totalDroppedItems))
-	if debuffHistoryCount > 0 or activeDebuffCount > 0 then
-		local debuffsApplied = tonumber(playerCombatStats.totalDebuffsApplied) or debuffHistoryCount
-		Analysis.AddViewLine(
-			lines,
-			"debuff",
-			"  Debuffs "
-				.. Analysis.FormatAmount(debuffsApplied)
-				.. (activeDebuffCount > 0 and (" | Active " .. Analysis.FormatAmount(activeDebuffCount)) or "")
-		)
-	end
 	Analysis.AppendCombatReviewLines(lines)
 	Analysis.AddViewLine(lines, "spacer", "")
 	Analysis.AddViewLine(lines, "header", "Units")
 
 	for _, mobName in ipairs(unitNames) do
+		local unitLineKind = Analysis.IsPlayerDeathCounterName(mobName) and "player_death" or "unit"
 		local unitLine = "  "
 			.. mobName
 			.. ": kills "
 			.. Analysis.FormatAmount(runtime.sessionKillCounts[mobName])
 			.. " | dealt "
-			.. Analysis.FormatAmount(runtime.damageDealtByUnit[mobName])
+			.. Analysis.FormatCompactAmount(runtime.damageDealtByUnit[mobName])
 			.. " | taken "
-			.. Analysis.FormatAmount(runtime.damageTakenByUnit[mobName])
+			.. Analysis.FormatCompactAmount(runtime.damageTakenByUnit[mobName])
 			.. " | exp "
-			.. Analysis.FormatAmount(runtime.expByUnit[mobName])
-		if not Analysis.AddViewLine(lines, "unit", Analysis.TruncateText(unitLine, 100)) then
+			.. Analysis.FormatCompactAmount(runtime.expByUnit[mobName])
+		if not Analysis.AddViewLine(lines, unitLineKind, Analysis.TruncateText(unitLine, 100)) then
 			return lines
 		end
 
@@ -5304,6 +5286,7 @@ end
 function Analysis.HasCurrentSessionData()
 	local stats = Analysis.EnsurePlayerCombatStats()
 	local energizeKeys = Analysis.BuildSortedEntryKeys(runtime.energizeBySkill, "amount")
+	local skillUsageKeys = Analysis.BuildSortedSkillUsageKeys()
 	return Analysis.GetSessionKillTotal() > 0
 		or (tonumber(runtime.totalDamageDealt) or 0) > 0
 		or (tonumber(runtime.totalDamageTaken) or 0) > 0
@@ -5311,14 +5294,13 @@ function Analysis.HasCurrentSessionData()
 		or Analysis.GetPlayerHealTotal() > 0
 		or (tonumber(stats.totalMisses) or 0) > 0
 		or (tonumber(stats.totalHealingReceived) or 0) > 0
-		or (tonumber(stats.totalDebuffsApplied) or 0) > 0
-		or #(runtime.debuffHistory or {}) > 0
-		or next(runtime.activeDebuffsOnPlayer or {}) ~= nil
+		or #skillUsageKeys > 0
 		or #energizeKeys > 0
 		or (tonumber(runtime.totalDroppedItems) or 0) > 0
 		or (tonumber(runtime.totalExpGained) or 0) > 0
 		or (tonumber(runtime.totalGoldEarned) or 0) > 0
 		or (tonumber(runtime.totalManaSpent) or 0) > 0
+		or Analysis.GetSessionDistanceTraveled() > 0
 end
 
 function Analysis.HasSessionKills()
@@ -5326,16 +5308,29 @@ function Analysis.HasSessionKills()
 end
 
 local function BuildCurrentSessionSummary()
+	local now = RefreshClock()
+	local averageExpPerKill = Analysis.GetAverageExpPerKill(now)
 	return "Session Kills "
 		.. Analysis.FormatAmount(Analysis.GetSessionKillTotal())
+		.. " | KPM "
+		.. Analysis.FormatPerMinute(Analysis.GetKillsPerMinute(now))
+		.. " | Session "
+		.. Analysis.FormatDuration(Analysis.GetSessionElapsedSeconds(now))
+		.. " | Kill Time "
+		.. Analysis.FormatDuration(Analysis.GetKillCombatDuration(now))
 		.. " | Damage "
-		.. Analysis.FormatAmount(runtime.totalDamageDealt)
+		.. Analysis.FormatCompactAmount(runtime.totalDamageDealt)
 		.. " | EXP "
-		.. Analysis.FormatAmount(runtime.totalExpGained)
+		.. Analysis.FormatCompactAmount(runtime.totalExpGained)
+		.. " ("
+		.. Analysis.FormatPerMinute(Analysis.GetExpPerMinute(now))
+		.. ")"
+		.. " | AEK "
+		.. Analysis.FormatCompactAmount(averageExpPerKill)
 		.. " | "
 		.. Analysis.FormatMoneyCopper(runtime.totalGoldEarned)
-		.. " | Debuffs "
-		.. Analysis.FormatAmount(tonumber(Analysis.EnsurePlayerCombatStats().totalDebuffsApplied) or #(runtime.debuffHistory or {}))
+		.. " | Distance "
+		.. Analysis.FormatDistanceMeters(Analysis.GetSessionDistanceTraveled())
 		.. " | Locations "
 		.. Analysis.FormatAmount(#(runtime.sessionKillLocations or {}))
 end
@@ -5362,7 +5357,8 @@ SaveCurrentSessionToHistory = function()
 	end
 
 	Analysis.SyncSessionResourceSnapshots()
-	Analysis.SyncActivePlayerDebuffsFromUnit()
+	local now = RefreshClock()
+	local averageExpPerKill = Analysis.GetAverageExpPerKill(now)
 	local ok, lines = pcall(Analysis.BuildViewDisplayLines)
 	if not ok or type(lines) ~= "table" then
 		lines = {
@@ -5387,7 +5383,14 @@ SaveCurrentSessionToHistory = function()
 		location = sessionLocation or "",
 		date = sessionDate or "",
 		summary = BuildCurrentSessionSummary(),
+		killTotal = Analysis.GetSessionKillTotal(),
 		createdAt = RefreshClock(),
+		sessionElapsedSeconds = Analysis.GetSessionElapsedSeconds(now),
+		killTimeSeconds = Analysis.GetKillCombatDuration(now),
+		distanceTraveled = Analysis.GetSessionDistanceTraveled(),
+		killsPerMinute = Analysis.GetKillsPerMinute(now),
+		expPerMinute = Analysis.GetExpPerMinute(now),
+		averageExpPerKill = averageExpPerKill,
 		lines = CopyViewLines(lines),
 		killLocations = killLocations,
 	}
@@ -5398,6 +5401,54 @@ end
 
 function Analysis.AddHistoryLine(lines, kind, text, sessionIndex)
 	lines[#lines + 1] = { kind = kind, text = text, sessionIndex = sessionIndex }
+end
+
+function Analysis.AddWrappedHistoryLine(lines, kind, text, sessionIndex, wrapChars, continuationPrefix)
+	text = tostring(text or "")
+	wrapChars = math.max(12, tonumber(wrapChars) or Analysis.HISTORY_TEXT_WRAP_CHARS)
+	continuationPrefix = continuationPrefix or "    "
+	if text == "" or string.len(text) <= wrapChars then
+		Analysis.AddHistoryLine(lines, kind, text, sessionIndex)
+		return 1
+	end
+
+	local count = 0
+	local remaining = text
+	local prefix = ""
+	while remaining ~= "" do
+		local available = wrapChars - string.len(prefix)
+		if available < 12 then
+			available = wrapChars
+			prefix = ""
+		end
+
+		local chunk = remaining
+		if string.len(chunk) > available then
+			local breakAt = nil
+			for index = available, 1, -1 do
+				local character = string.sub(chunk, index, index)
+				if character == " " or character == "\t" then
+					breakAt = index
+					break
+				end
+			end
+			if breakAt ~= nil and breakAt > 1 then
+				chunk = string.sub(remaining, 1, breakAt - 1)
+				remaining = string.sub(remaining, breakAt + 1)
+			else
+				chunk = string.sub(remaining, 1, available)
+				remaining = string.sub(remaining, available + 1)
+			end
+			remaining = string.gsub(remaining, "^%s+", "")
+		else
+			remaining = ""
+		end
+
+		Analysis.AddHistoryLine(lines, kind, prefix .. chunk, sessionIndex)
+		count = count + 1
+		prefix = continuationPrefix
+	end
+	return count
 end
 
 function Analysis.BuildAllHistoryDisplayLines()
@@ -5411,13 +5462,13 @@ function Analysis.BuildAllHistoryDisplayLines()
 	for sessionIndex = #runtime.historySessions, 1, -1 do
 		local session = runtime.historySessions[sessionIndex]
 		if type(session) == "table" then
-			Analysis.AddHistoryLine(lines, "header", tostring(session.name or ("S" .. tostring(sessionIndex))), sessionIndex)
-			Analysis.AddHistoryLine(lines, "metric", "  " .. Analysis.TruncateText(session.summary or "", 100), sessionIndex)
+			Analysis.AddWrappedHistoryLine(lines, "header", tostring(session.name or ("S" .. tostring(sessionIndex))), sessionIndex, nil, "  ")
+			Analysis.AddWrappedHistoryLine(lines, "metric", "  " .. tostring(session.summary or ""), sessionIndex)
 			if #(session.killLocations or {}) > 0 then
-				Analysis.AddHistoryLine(
+				Analysis.AddWrappedHistoryLine(
 					lines,
 					"time",
-					"  Kill map: " .. Analysis.FormatAmount(#session.killLocations) .. " recorded kill locations",
+					"  Kill map: common area from " .. Analysis.FormatAmount(#session.killLocations) .. " recorded kill locations",
 					sessionIndex
 				)
 			end
@@ -5427,7 +5478,7 @@ function Analysis.BuildAllHistoryDisplayLines()
 				for _, line in ipairs(session.lines) do
 					local text = tostring(line.text or "")
 					if text ~= "" and line.kind ~= "spacer" and line.kind ~= "header" then
-						Analysis.AddHistoryLine(lines, line.kind or "metric", Analysis.TruncateText("  " .. Trim(text), 100), sessionIndex)
+						Analysis.AddWrappedHistoryLine(lines, line.kind or "metric", "  " .. Trim(text), sessionIndex)
 						shown = shown + 1
 						if shown >= 2 then
 							break
@@ -5494,10 +5545,6 @@ function Analysis.TrackKillMapObject(object)
 end
 
 function Analysis.GetWorldMapContent()
-	local mapEdit = _G.LootMapEdit
-	if type(mapEdit) == "table" and type(mapEdit.GetWorldMapContent) == "function" then
-		return mapEdit:GetWorldMapContent()
-	end
 	if ADDON == nil or type(ADDON.GetContent) ~= "function" or UIC_WORLDMAP == nil then
 		return nil
 	end
@@ -5506,6 +5553,21 @@ function Analysis.GetWorldMapContent()
 		return content
 	end
 	return nil
+end
+
+function Analysis.MarkWorldArea(mapWidget, x, y, z, radius, index)
+	if mapWidget == nil then
+		return false
+	end
+	return SafeCall(
+		mapWidget,
+		"ShowSkillMapEffect",
+		SafeNumber(x, 0),
+		SafeNumber(y, 0),
+		SafeNumber(z, 0),
+		SafeNumber(radius, 0),
+		tonumber(index) or 1
+	)
 end
 
 function Analysis.ClearWorldMapKillEffects()
@@ -5547,41 +5609,83 @@ function Analysis.GetKillLocationMapCoordinates(point)
 	return x, y, tonumber(z) or 0
 end
 
-function Analysis.GetKillLocationBounds(points)
-	local bounds = nil
+-- Groups nearby kill coordinates into fuzzy clusters, then returns the largest
+-- cluster's center. This avoids requiring exact coordinate matches while still
+-- identifying the area where kills were most frequently recorded.
+function Analysis.BuildMostCommonKillLocation(points, zoneGroupFilter)
+	local clusters = {}
+	local tolerance = math.max(1, tonumber(Analysis.KILL_MAP_COMMON_COORD_TOLERANCE) or 54)
+	local toleranceSq = tolerance * tolerance
+	local requiredZoneGroup = tonumber(zoneGroupFilter)
+
 	for _, point in ipairs(points or {}) do
-		local x, y = Analysis.GetKillLocationMapCoordinates(point)
-		if x ~= nil and y ~= nil then
-			if bounds == nil then
-				bounds = { minX = x, maxX = x, minY = y, maxY = y, count = 1 }
-			else
-				if x < bounds.minX then
-					bounds.minX = x
+		if requiredZoneGroup == nil or tonumber(point.zoneGroup) == requiredZoneGroup then
+			local x, y, z = Analysis.GetKillLocationMapCoordinates(point)
+			if x ~= nil and y ~= nil then
+				local bestCluster = nil
+				local bestDistanceSq = nil
+				for _, cluster in ipairs(clusters) do
+					local dx = x - cluster.x
+					local dy = y - cluster.y
+					local distanceSq = (dx * dx) + (dy * dy)
+					if distanceSq <= toleranceSq and (bestDistanceSq == nil or distanceSq < bestDistanceSq) then
+						bestCluster = cluster
+						bestDistanceSq = distanceSq
+					end
 				end
-				if x > bounds.maxX then
-					bounds.maxX = x
+				if bestCluster == nil then
+					bestCluster = {
+						count = 0,
+						sumX = 0,
+						sumY = 0,
+						sumZ = 0,
+						x = x,
+						y = y,
+						z = tonumber(z) or 0,
+					}
+					clusters[#clusters + 1] = bestCluster
 				end
-				if y < bounds.minY then
-					bounds.minY = y
-				end
-				if y > bounds.maxY then
-					bounds.maxY = y
-				end
-				bounds.count = bounds.count + 1
+				bestCluster.count = bestCluster.count + 1
+				bestCluster.sumX = bestCluster.sumX + x
+				bestCluster.sumY = bestCluster.sumY + y
+				bestCluster.sumZ = bestCluster.sumZ + (tonumber(z) or 0)
+				bestCluster.x = bestCluster.sumX / bestCluster.count
+				bestCluster.y = bestCluster.sumY / bestCluster.count
+				bestCluster.z = bestCluster.sumZ / bestCluster.count
 			end
 		end
 	end
-	return bounds
+
+	local bestCluster = nil
+	for _, cluster in ipairs(clusters) do
+		if bestCluster == nil
+			or cluster.count > bestCluster.count
+			or (cluster.count == bestCluster.count and cluster.x < bestCluster.x)
+		then
+			bestCluster = cluster
+		end
+	end
+	if bestCluster == nil then
+		return nil
+	end
+	return {
+		x = bestCluster.x,
+		y = bestCluster.y,
+		z = bestCluster.z,
+		count = bestCluster.count,
+		radius = math.max(
+			18,
+			math.min(
+				80,
+				(tonumber(Analysis.KILL_MAP_COMMON_MARKER_RADIUS) or 24) + math.min(30, bestCluster.count * 2)
+			)
+		),
+	}
 end
 
 function Analysis.GetSessionMapAnchor(session)
 	local locations = Analysis.CopyKillLocations(session and session.killLocations)
-	local sumX = 0
-	local sumY = 0
-	local sumZ = 0
-	local count = 0
 	local zoneCounts = {}
-	local bestZoneGroup = tonumber(session and session.zoneGroup)
 	local bestZoneCount = 0
 
 	for _, point in ipairs(locations) do
@@ -5594,128 +5698,32 @@ function Analysis.GetSessionMapAnchor(session)
 				bestZoneGroup = zoneGroup
 			end
 		end
-		local x, y, z = Analysis.GetKillLocationMapCoordinates(point)
-		if x ~= nil and y ~= nil then
-			sumX = sumX + x
-			sumY = sumY + y
-			sumZ = sumZ + (tonumber(z) or 0)
-			count = count + 1
-		end
 	end
 
 	if bestZoneGroup == nil then
 		return nil, locations
 	end
-	if count <= 0 then
+	local commonLocation = Analysis.BuildMostCommonKillLocation(locations, bestZoneGroup)
+	if commonLocation == nil then
+		commonLocation = Analysis.BuildMostCommonKillLocation(locations)
+	end
+	if commonLocation ~= nil then
 		return {
 			zoneGroup = bestZoneGroup,
-			x = 0,
-			y = 0,
-			z = 0,
-			count = 0,
+			x = commonLocation.x,
+			y = commonLocation.y,
+			z = commonLocation.z,
+			count = commonLocation.count,
+			radius = commonLocation.radius,
 		}, locations
 	end
 	return {
 		zoneGroup = bestZoneGroup,
-		x = sumX / count,
-		y = sumY / count,
-		z = sumZ / count,
-		count = count,
+		x = 0,
+		y = 0,
+		z = 0,
+		count = 0,
 	}, locations
-end
-
-function Analysis.BuildKillRouteSamples(points, maxCount)
-	local samples = {}
-	local candidates = {}
-	for _, point in ipairs(points or {}) do
-		local x, y, z = Analysis.GetKillLocationMapCoordinates(point)
-		if x ~= nil and y ~= nil then
-			candidates[#candidates + 1] = {
-				x = x,
-				y = y,
-				z = z,
-			}
-		end
-	end
-
-	maxCount = math.max(1, tonumber(maxCount) or Analysis.KILL_MAP_ROUTE_EFFECT_LIMIT)
-	if #candidates <= maxCount then
-		return candidates
-	end
-	if maxCount == 1 then
-		return { candidates[#candidates] }
-	end
-
-	local step = (#candidates - 1) / (maxCount - 1)
-	local lastIndex = 0
-	for sampleIndex = 1, maxCount do
-		local candidateIndex = math.floor(1 + ((sampleIndex - 1) * step) + 0.5)
-		if candidateIndex <= lastIndex then
-			candidateIndex = lastIndex + 1
-		end
-		if candidateIndex > #candidates then
-			candidateIndex = #candidates
-		end
-		samples[#samples + 1] = candidates[candidateIndex]
-		lastIndex = candidateIndex
-	end
-	return samples
-end
-
--- The built-in map APIs consume world coordinates. Clustering in that same
--- coordinate space keeps hotspot circles anchored to the real session map.
-function Analysis.BuildKillHotspots(points, maxCount)
-	local cells = {}
-	local bounds = Analysis.GetKillLocationBounds(points)
-	local cellSize = tonumber(Analysis.KILL_MAP_HOTSPOT_CELL_SIZE) or 54
-	if bounds ~= nil then
-		local span = math.max(bounds.maxX - bounds.minX, bounds.maxY - bounds.minY)
-		if span > 0 then
-			cellSize = math.max(cellSize, span / 12)
-		end
-	end
-	for _, point in ipairs(points or {}) do
-		local x, y, z = Analysis.GetKillLocationMapCoordinates(point)
-		if x ~= nil and y ~= nil then
-			local cellX = math.floor(x / cellSize)
-			local cellY = math.floor(y / cellSize)
-			local key = tostring(cellX) .. ":" .. tostring(cellY)
-			local cell = cells[key]
-			if cell == nil then
-				cell = { count = 0, sumX = 0, sumY = 0, sumZ = 0 }
-				cells[key] = cell
-			end
-			cell.count = cell.count + 1
-			cell.sumX = cell.sumX + x
-			cell.sumY = cell.sumY + y
-			cell.sumZ = cell.sumZ + (tonumber(z) or 0)
-		end
-	end
-
-	local hotspots = {}
-	for _, cell in pairs(cells) do
-		if cell.count > 0 then
-			local radius = math.max(18, (cellSize * 0.55) + math.min(cellSize, cell.count * 4))
-			hotspots[#hotspots + 1] = {
-				x = cell.sumX / cell.count,
-				y = cell.sumY / cell.count,
-				z = cell.sumZ / cell.count,
-				count = cell.count,
-				radius = radius,
-			}
-		end
-	end
-	table.sort(hotspots, function(left, right)
-		if left.count ~= right.count then
-			return left.count > right.count
-		end
-		return left.radius > right.radius
-	end)
-	maxCount = math.max(0, tonumber(maxCount) or Analysis.KILL_MAP_HOTSPOT_LIMIT)
-	while #hotspots > maxCount do
-		table.remove(hotspots)
-	end
-	return hotspots
 end
 
 function Analysis.OpenKillSessionWorldMap(session)
@@ -5728,41 +5736,24 @@ function Analysis.OpenKillSessionWorldMap(session)
 end
 
 function Analysis.RenderKillMapSession(session)
-	local mapEdit = _G.LootMapEdit
-	if type(mapEdit) ~= "table" or type(mapEdit.MarkWorldArea) ~= "function" then
-		return false
-	end
 	local mapWidget = Analysis.GetWorldMapContent()
 	if mapWidget == nil then
 		return false
 	end
-	local locations = Analysis.CopyKillLocations(session and session.killLocations)
-	if #locations == 0 then
+	local anchor = Analysis.GetSessionMapAnchor(session)
+	if anchor == nil or (tonumber(anchor.count) or 0) <= 0 then
 		return false
 	end
 
 	Analysis.ClearWorldMapKillEffects()
-	local effectIndex = 1
-	local routeLimit = math.min(Analysis.KILL_MAP_ROUTE_EFFECT_LIMIT, Analysis.KILL_MAP_EFFECT_LIMIT)
-	local routeSamples = Analysis.BuildKillRouteSamples(locations, routeLimit)
-	for _, sample in ipairs(routeSamples) do
-		if effectIndex > Analysis.KILL_MAP_EFFECT_LIMIT then
-			return true
-		end
-		mapEdit:MarkWorldArea(mapWidget, sample.x, sample.y, sample.z, 18, effectIndex, {})
-		effectIndex = effectIndex + 1
-	end
-
-	local hotspotLimit = Analysis.KILL_MAP_EFFECT_LIMIT - effectIndex + 1
-	local hotspots = Analysis.BuildKillHotspots(locations, math.min(Analysis.KILL_MAP_HOTSPOT_LIMIT, hotspotLimit))
-	for _, hotspot in ipairs(hotspots) do
-		if effectIndex > Analysis.KILL_MAP_EFFECT_LIMIT then
-			return true
-		end
-		mapEdit:MarkWorldArea(mapWidget, hotspot.x, hotspot.y, hotspot.z, hotspot.radius, effectIndex, {})
-		effectIndex = effectIndex + 1
-	end
-	return true
+	return Analysis.MarkWorldArea(
+		mapWidget,
+		anchor.x,
+		anchor.y,
+		anchor.z,
+		tonumber(anchor.radius) or Analysis.KILL_MAP_COMMON_MARKER_RADIUS,
+		1
+	)
 end
 
 function Analysis.ScheduleKillMapOverlay(session)
@@ -6095,6 +6086,10 @@ function runtime:ShowViewWindow()
 end
 
 function runtime:ShowHistoryWindow()
+	LoadSessionHistory()
+	if #runtime.historySessions > 0 then
+		SaveSessionHistory()
+	end
 	runtime.viewMode = "history"
 	runtime.historyPage = 1
 	if UpdateViewWindow ~= nil then
@@ -6201,16 +6196,21 @@ function eventWindow:OnEvent(event, ...)
 		Analysis.EvaluateKillCombatEnd(RefreshClock())
 		return
 	end
-	if event == "DEBUFF_UPDATE" then
-		CaptureSessionActivityLocation()
-		if Analysis.SyncActivePlayerDebuffsFromUnit() then
-			RefreshViewWindowIfVisible()
+	if event == "UNIT_DEAD" or event == "UNIT_DEAD_NOTICE" then
+		local deathName = Analysis.ExtractAlliedPlayerDeathName(...)
+		if deathName ~= nil then
+			Analysis.CountAlliedPlayerDeath(deathName, Analysis.ResolveLocalPlayerDeathKillerName())
+		else
+			Analysis.TryCountLocalPlayerDeath(Analysis.ResolveLocalPlayerDeathKillerName())
 		end
 		return
 	end
+	if event == "PLAYER_RESURRECTED" then
+		Analysis.SyncLocalPlayerDeathState()
+		return
+	end
 	if event == "COMBAT_MSG" then
-		CaptureSessionActivityLocation()
-		UpdateCurrentTarget(true)
+		runtime.targetRefreshDirty = true
 		HandleCombatMessage(...)
 		return
 	end
@@ -6267,7 +6267,9 @@ eventWindow:RegisterEvent("EXP_CHANGED")
 eventWindow:RegisterEvent("SPELLCAST_START")
 eventWindow:RegisterEvent("SPELLCAST_SUCCEEDED")
 eventWindow:RegisterEvent("UNIT_COMBAT_STATE_CHANGED")
-eventWindow:RegisterEvent("DEBUFF_UPDATE")
+eventWindow:RegisterEvent("UNIT_DEAD")
+eventWindow:RegisterEvent("UNIT_DEAD_NOTICE")
+eventWindow:RegisterEvent("PLAYER_RESURRECTED")
 eventWindow:RegisterEvent("TARGET_CHANGED")
 eventWindow:RegisterEvent("TARGET_TO_TARGET_CHANGED")
 eventWindow:RegisterEvent("AGGRO_METER_CLEARED")
@@ -6325,14 +6327,8 @@ function eventWindow:OnUpdate(dt)
 		end
 	end
 	Analysis.UpdatePendingKillMapOverlay(locationTickElapsed)
-	runtime.debuffSyncElapsed = (tonumber(runtime.debuffSyncElapsed) or 0) + locationTickElapsed
-	if runtime.debuffSyncElapsed >= 1 then
-		runtime.debuffSyncElapsed = 0
-		if Analysis.SyncActivePlayerDebuffsFromUnit() then
-			RefreshViewWindowIfVisible()
-		end
-	end
 	Analysis.SyncSessionResourceSnapshots()
+	Analysis.SyncLocalPlayerDeathState()
 	if runtime.pendingBagSyncUntil ~= nil then
 		Analysis.SyncBagDrops(false)
 		if now >= runtime.pendingBagSyncUntil then
@@ -6342,7 +6338,12 @@ function eventWindow:OnUpdate(dt)
 	Analysis.EvaluateKillCombatEnd(now)
 	PruneTargetSnapshots()
 	PrunePendingTargetHits()
-	UpdateCurrentTarget()
+	runtime.targetRefreshElapsed = (tonumber(runtime.targetRefreshElapsed) or 0) + locationTickElapsed
+	if runtime.targetRefreshElapsed >= Analysis.TARGET_REFRESH_INTERVAL_SECONDS then
+		runtime.targetRefreshElapsed = 0
+		runtime.targetRefreshDirty = false
+		UpdateCurrentTarget()
+	end
 end
 eventWindow:SetHandler("OnUpdate", eventWindow.OnUpdate)
 
