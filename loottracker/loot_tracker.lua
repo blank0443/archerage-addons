@@ -66,6 +66,14 @@ local runtime = {
 	menuMode = false,
 	escMenuButtonRegistered = false,
 	lootRateMarker = nil,
+	trackedDropRatesByKey = {},
+	trackedSessionAcquiredByKey = {},
+	dropRateSessionKillStart = nil,
+	dropRateLastObservedKillTotal = nil,
+	dropRateIdleElapsed = 0,
+	dropRateLastLootActivityAt = nil,
+	sessionAcquiredIdleElapsed = 0,
+	sessionAcquiredLastActivityAt = nil,
 	acquisitionGlowActive = false,
 	acquisitionGlowRows = {},
 	acquisitionGlowBatchStartedAt = nil,
@@ -109,6 +117,11 @@ local CONFIG = {
 	LOOT_RATE_MARKER_WIDTH = 48,
 	LOOT_RATE_MARKER_HEIGHT = 18,
 	LOOT_RATE_TEXT_COLOR = { 0.28, 1.0, 0.36, 1 },
+	TRACKED_DROP_RATE_IDLE_RESET_SECONDS = 120.0,
+	TRACKED_DROP_RATE_LABEL_HEIGHT = 14,
+	TRACKED_DROP_RATE_LABEL_FONT_SIZE = 9,
+	TRACKED_DROP_RATE_TEXT_COLOR = { 0.28, 1.0, 0.36, 1 },
+	TRACKED_SESSION_COUNT_TEXT_COLOR = { 0.72, 0.42, 1.0, 1 },
 	BOX_SIZE = 40,
 	BOX_GAP = 6,
 	TRACKER_ROW_TOP_GAP = 3,
@@ -1009,6 +1022,377 @@ local function SetIconDrawable(iconDrawable, iconPath)
 	end
 end
 
+local function ApplyTrackedDropRateTextColor(label)
+	if label == nil or label.style == nil then
+		return
+	end
+	local color = CONFIG.TRACKED_DROP_RATE_TEXT_COLOR
+	label.style:SetColor(color[1], color[2], color[3], color[4])
+end
+
+local function ApplyTrackedSessionCountTextColor(label)
+	if label == nil or label.style == nil then
+		return
+	end
+	local color = CONFIG.TRACKED_SESSION_COUNT_TEXT_COLOR
+	label.style:SetColor(color[1], color[2], color[3], color[4])
+end
+
+local function SetRowDropRateText(row, text)
+	if row == nil then
+		return
+	end
+
+	local nextText = tostring(text or "")
+	local visible = nextText ~= "" and row.dropRateLabel ~= nil
+	if row.dropRateLabel ~= nil then
+		if row.lastDropRateText ~= nextText then
+			row.dropRateLabel:SetText(nextText)
+			row.lastDropRateText = nextText
+		end
+		if visible then
+			ApplyTrackedDropRateTextColor(row.dropRateLabel)
+			row.dropRateLabel:Show(true)
+			SafeMethod(row.dropRateLabel, "Raise")
+		else
+			row.dropRateLabel:Show(false)
+		end
+	end
+	if row.nameLabel ~= nil then
+		row.nameLabel:Show(false)
+	end
+end
+
+local function SetRowSessionAcquiredText(row, text)
+	if row == nil or row.sessionAcquiredLabel == nil then
+		return
+	end
+
+	local nextText = tostring(text or "")
+	if row.lastSessionAcquiredText ~= nextText then
+		row.sessionAcquiredLabel:SetText(nextText)
+		row.lastSessionAcquiredText = nextText
+	end
+	ApplyTrackedSessionCountTextColor(row.sessionAcquiredLabel)
+	row.sessionAcquiredLabel:Show(nextText ~= "")
+	if nextText ~= "" then
+		SafeMethod(row.sessionAcquiredLabel, "Raise")
+	end
+	if row.nameLabel ~= nil then
+		row.nameLabel:Show(false)
+	end
+end
+
+local function GetTrackedDropRateKey(tracked)
+	if type(tracked) ~= "table" then
+		return nil
+	end
+	return tracked.key or BuildItemKey(tracked.name, tracked.grade, tracked.iconPath) or NormalizeName(tracked.name)
+end
+
+local function NormalizeTrackedDropCount(count)
+	count = math.floor((tonumber(count) or 1) + 0.5)
+	if count < 1 then
+		return 1
+	end
+	return count
+end
+
+local function GetCurrentSessionKillTotal()
+	-- Reads the kill counter runtime directly so rates update even when the counter window is closed.
+	local analysis = _G.__LOOT_KILL_COUNTER_ANALYSIS
+	if type(analysis) == "table" and type(analysis.GetSessionKillTotal) == "function" then
+		local ok, value = pcall(analysis.GetSessionKillTotal)
+		value = ok and tonumber(value) or nil
+		if value ~= nil then
+			return math.floor(value)
+		end
+	end
+
+	local counterRuntime = _G.__LOOT_KILL_COUNTER_RUNTIME
+	if type(counterRuntime) ~= "table" or type(counterRuntime.sessionKillCounts) ~= "table" then
+		return nil
+	end
+
+	local total = 0
+	for _, count in pairs(counterRuntime.sessionKillCounts) do
+		count = tonumber(count)
+		if count ~= nil and count > 0 then
+			total = total + math.floor(count)
+		end
+	end
+	return total
+end
+
+local function HasTrackedDropRateStats()
+	for _, stats in pairs(runtime.trackedDropRatesByKey or {}) do
+		if type(stats) == "table" and (tonumber(stats.drops) or 0) > 0 then
+			return true
+		end
+	end
+	return false
+end
+
+local function HasTrackedSessionAcquiredStats()
+	for _, count in pairs(runtime.trackedSessionAcquiredByKey or {}) do
+		if (tonumber(count) or 0) > 0 then
+			return true
+		end
+	end
+	return false
+end
+
+function runtime:ClearTrackedDropRates()
+	self.trackedDropRatesByKey = {}
+	self.dropRateSessionKillStart = nil
+	self.dropRateIdleElapsed = 0
+	self.dropRateLastLootActivityAt = nil
+	local currentKills = GetCurrentSessionKillTotal()
+	if currentKills ~= nil then
+		self.dropRateLastObservedKillTotal = currentKills
+	end
+	for _, row in pairs(rowWidgets) do
+		SetRowDropRateText(row, nil)
+	end
+end
+
+function runtime:ClearTrackedSessionAcquiredCounts()
+	self.trackedSessionAcquiredByKey = {}
+	self.sessionAcquiredIdleElapsed = 0
+	self.sessionAcquiredLastActivityAt = nil
+	self:RefreshTrackedSessionAcquiredLabels()
+end
+
+function runtime:MarkSessionAcquiredActivity()
+	self.sessionAcquiredIdleElapsed = 0
+	local now = CurrentClock()
+	if now > 0 then
+		self.sessionAcquiredLastActivityAt = now
+	end
+end
+
+function runtime:GetTrackedSessionAcquiredText(tracked)
+	if tracked == nil then
+		return nil
+	end
+	local key = GetTrackedDropRateKey(tracked)
+	local count = key ~= nil and tonumber(self.trackedSessionAcquiredByKey[key]) or nil
+	return "x" .. tostring(math.floor(count or 0))
+end
+
+function runtime:RefreshTrackedSessionAcquiredLabels()
+	for index = 1, TRACKED_SLOT_COUNT do
+		SetRowSessionAcquiredText(rowWidgets[index], self:GetTrackedSessionAcquiredText(trackedItems[index]))
+	end
+end
+
+function runtime:RecordTrackedSessionAcquisition(tracked, count)
+	-- Inventory gains are source-agnostic here, so purchases and loot both increase the session count.
+	local key = GetTrackedDropRateKey(tracked)
+	if key == nil or key == "" then
+		return false
+	end
+	count = NormalizeTrackedDropCount(count)
+	self.trackedSessionAcquiredByKey[key] = (tonumber(self.trackedSessionAcquiredByKey[key]) or 0) + count
+	self:MarkSessionAcquiredActivity()
+	self:RefreshTrackedSessionAcquiredLabels()
+	return true
+end
+
+function runtime:UpdateTrackedSessionAcquiredCounts(delta)
+	if not HasTrackedSessionAcquiredStats() then
+		return
+	end
+
+	local safeDelta = tonumber(delta) or 0
+	if safeDelta < 0 then
+		safeDelta = 0
+	elseif safeDelta > 1 then
+		safeDelta = 1
+	end
+	self.sessionAcquiredIdleElapsed = (tonumber(self.sessionAcquiredIdleElapsed) or 0) + safeDelta
+
+	local now = CurrentClock()
+	local lastActivityAt = tonumber(self.sessionAcquiredLastActivityAt)
+	if lastActivityAt ~= nil and now > 0 then
+		if now - lastActivityAt >= CONFIG.TRACKED_DROP_RATE_IDLE_RESET_SECONDS then
+			self:ClearTrackedSessionAcquiredCounts()
+		end
+	elseif self.sessionAcquiredIdleElapsed >= CONFIG.TRACKED_DROP_RATE_IDLE_RESET_SECONDS then
+		self:ClearTrackedSessionAcquiredCounts()
+	end
+end
+
+function runtime:ObserveDropRateKillTotal()
+	-- The first observed kill after a reset becomes the denominator boundary for this farming burst.
+	local currentKills = GetCurrentSessionKillTotal()
+	if currentKills == nil then
+		return nil, nil
+	end
+
+	local previousKills = tonumber(self.dropRateLastObservedKillTotal)
+	if previousKills ~= nil and currentKills < previousKills then
+		self:ClearTrackedDropRates()
+		self:ClearTrackedSessionAcquiredCounts()
+		previousKills = tonumber(self.dropRateLastObservedKillTotal)
+	end
+	if previousKills ~= nil and currentKills > previousKills and self.dropRateSessionKillStart == nil then
+		self.dropRateSessionKillStart = previousKills
+	end
+	self.dropRateLastObservedKillTotal = currentKills
+	return currentKills, previousKills
+end
+
+function runtime:EnsureDropRateSessionStart(currentKills, previousKills)
+	currentKills = tonumber(currentKills)
+	if currentKills == nil then
+		return nil
+	end
+	if self.dropRateSessionKillStart == nil then
+		previousKills = tonumber(previousKills)
+		if previousKills ~= nil and previousKills <= currentKills then
+			self.dropRateSessionKillStart = previousKills
+		else
+			self.dropRateSessionKillStart = math.max(0, currentKills - 1)
+		end
+	end
+	return self.dropRateSessionKillStart
+end
+
+function runtime:GetDropRateSessionKillCount(currentKills)
+	currentKills = tonumber(currentKills)
+	if currentKills == nil then
+		currentKills = self:ObserveDropRateKillTotal()
+	end
+	local startKills = tonumber(self.dropRateSessionKillStart)
+	if currentKills == nil or startKills == nil then
+		return nil
+	end
+
+	local kills = currentKills - startKills
+	if kills < 1 then
+		kills = 1
+	end
+	return math.floor(kills)
+end
+
+function runtime:MarkDropRateLootActivity()
+	self.dropRateIdleElapsed = 0
+	local now = CurrentClock()
+	if now > 0 then
+		self.dropRateLastLootActivityAt = now
+	end
+end
+
+function runtime:FormatTrackedDropRatePercent(percent)
+	percent = tonumber(percent)
+	if percent == nil or percent < 0 then
+		return nil
+	end
+	if percent > 100 then
+		percent = 100
+	end
+
+	local roundedInteger = math.floor(percent + 0.5)
+	if math.abs(percent - roundedInteger) < 0.05 or percent >= 10 then
+		return tostring(roundedInteger) .. "%"
+	end
+	if percent >= 1 then
+		return string.format("%.1f%%", percent)
+	end
+	return string.format("%.2f%%", percent)
+end
+
+function runtime:GetTrackedDropRateText(tracked, currentKills)
+	local key = GetTrackedDropRateKey(tracked)
+	local stats = key ~= nil and self.trackedDropRatesByKey[key] or nil
+	if type(stats) ~= "table" or (tonumber(stats.drops) or 0) <= 0 then
+		return nil
+	end
+
+	local kills = self:GetDropRateSessionKillCount(currentKills)
+	if kills == nil or kills <= 0 then
+		kills = tonumber(stats.sampleKills)
+	end
+	if kills == nil or kills <= 0 then
+		return nil
+	end
+
+	return self:FormatTrackedDropRatePercent(((tonumber(stats.drops) or 0) / kills) * 100)
+end
+
+function runtime:RefreshTrackedDropRateLabels(currentKills)
+	if currentKills == nil then
+		currentKills = self:ObserveDropRateKillTotal()
+	end
+	for index = 1, TRACKED_SLOT_COUNT do
+		SetRowDropRateText(rowWidgets[index], self:GetTrackedDropRateText(trackedItems[index], currentKills))
+	end
+end
+
+function runtime:RecordTrackedItemDrop(tracked, count)
+	-- A tracked inventory increase may be a stack gain, so store gained item count against the active kill span.
+	local key = GetTrackedDropRateKey(tracked)
+	if key == nil or key == "" then
+		return false
+	end
+
+	local currentKills, previousKills = self:ObserveDropRateKillTotal()
+	if currentKills == nil or currentKills <= 0 then
+		return false
+	end
+	self:EnsureDropRateSessionStart(currentKills, previousKills)
+	local sampleKills = self:GetDropRateSessionKillCount(currentKills)
+	if sampleKills == nil or sampleKills <= 0 then
+		return false
+	end
+
+	local stats = self.trackedDropRatesByKey[key]
+	if type(stats) ~= "table" then
+		stats = {
+			drops = 0,
+			sampleKills = sampleKills,
+		}
+		self.trackedDropRatesByKey[key] = stats
+	end
+	stats.drops = (tonumber(stats.drops) or 0) + NormalizeTrackedDropCount(count)
+	stats.sampleKills = sampleKills
+	stats.lastDropAt = CurrentClock()
+	self:MarkDropRateLootActivity()
+	self:RefreshTrackedDropRateLabels(currentKills)
+	return true
+end
+
+function runtime:UpdateTrackedDropRates(delta)
+	-- Recalculates existing labels as kill totals rise and clears them after loot activity goes idle.
+	local currentKills = self:ObserveDropRateKillTotal()
+	if not HasTrackedDropRateStats() then
+		return
+	end
+
+	local safeDelta = tonumber(delta) or 0
+	if safeDelta < 0 then
+		safeDelta = 0
+	elseif safeDelta > 1 then
+		safeDelta = 1
+	end
+	self.dropRateIdleElapsed = (tonumber(self.dropRateIdleElapsed) or 0) + safeDelta
+
+	local now = CurrentClock()
+	local lastLootActivityAt = tonumber(self.dropRateLastLootActivityAt)
+	if lastLootActivityAt ~= nil and now > 0 then
+		if now - lastLootActivityAt >= CONFIG.TRACKED_DROP_RATE_IDLE_RESET_SECONDS then
+			self:ClearTrackedDropRates()
+			return
+		end
+	elseif self.dropRateIdleElapsed >= CONFIG.TRACKED_DROP_RATE_IDLE_RESET_SECONDS then
+		self:ClearTrackedDropRates()
+		return
+	end
+
+	self:RefreshTrackedDropRateLabels(currentKills)
+end
+
 	-- Sets the background color of a row based on state (tracked, missing, or empty).
 local function SetRowBackground(row, state)
 	if row == nil or row.bg == nil then
@@ -1346,6 +1730,8 @@ function runtime:SyncRowAcquisitionGlow(row, tracked, current)
 	end
 
 	if row.lastObservedTrackedCount ~= nil and nextCount > row.lastObservedTrackedCount then
+		self:RecordTrackedSessionAcquisition(tracked, nextCount - row.lastObservedTrackedCount)
+		self:RecordTrackedItemDrop(tracked, nextCount - row.lastObservedTrackedCount)
 		self:StartRowAcquisitionGlow(row)
 	end
 	row.lastObservedTrackedCount = nextCount
@@ -1399,11 +1785,10 @@ local function SetRowText(row, nameText, countText, state, iconPath)
 	end
 
 	row.fullName = nameText or ""
-	local compactName = CompactName(nameText)
 	local nextCountText = countText or ""
-	if row.lastCompactName ~= compactName then
-		row.nameLabel:SetText(compactName)
-		row.lastCompactName = compactName
+	if row.nameLabel ~= nil then
+		row.nameLabel:SetText("")
+		row.nameLabel:Show(false)
 	end
 	if row.lastCountText ~= nextCountText then
 		row.countLabel:SetText(nextCountText)
@@ -1705,6 +2090,8 @@ local function ClearTrackedItems()
 	if hadTrackedItems then
 		SaveTrackedItems()
 	end
+	runtime:ClearTrackedDropRates()
+	runtime:ClearTrackedSessionAcquiredCounts()
 	refreshRequested = true
 	if UpdateRows ~= nil then
 	-- Opens the picker for a specific tracked slot, resets scroll and search, anchors picker, shows it and sets focus.
@@ -1766,6 +2153,7 @@ end
 UpdateRows = function()
 	-- Updates all tracked rows with current inventory counts or missing state from the snapshot.
 	local itemsByKey, _, itemsByName = GetInventorySnapshot(false)
+	local currentDropRateKills = runtime:ObserveDropRateKillTotal()
 
 	for index = 1, TRACKED_SLOT_COUNT do
 		local row = rowWidgets[index]
@@ -1773,6 +2161,8 @@ UpdateRows = function()
 		if tracked == nil then
 			runtime:SyncRowAcquisitionGlow(row, nil, nil)
 			SetRowText(row, "", "", "empty", nil)
+			SetRowDropRateText(row, nil)
+			SetRowSessionAcquiredText(row, nil)
 		else
 			local current = ResolveTrackedInventoryEntry(itemsByKey, tracked, itemsByName)
 			if current ~= nil then
@@ -1782,6 +2172,8 @@ UpdateRows = function()
 				runtime:SyncRowAcquisitionGlow(row, tracked, nil)
 				SetRowText(row, tracked.name, "x0", "missing", tracked.iconPath)
 			end
+			SetRowDropRateText(row, runtime:GetTrackedDropRateText(tracked, currentDropRateKills))
+			SetRowSessionAcquiredText(row, runtime:GetTrackedSessionAcquiredText(tracked))
 		end
 	end
 end
@@ -2546,12 +2938,27 @@ local function AnchorTrackedRows()
 				row.nameLabel:RemoveAllAnchors()
 				row.nameLabel:AddAnchor("TOP", row, 0, runtime:Scale(5))
 				row.nameLabel.style:SetFontSize(runtime:Scale(8))
+				row.nameLabel:Show(false)
 			end
 			if row.countLabel ~= nil then
-				row.countLabel:SetExtent(boxSize - runtime:Scale(5), runtime:Scale(15))
+				row.countLabel:SetExtent(boxSize - runtime:Scale(5), runtime:Scale(13))
 				row.countLabel:RemoveAllAnchors()
-				row.countLabel:AddAnchor("BOTTOM", row, 0, -runtime:Scale(3))
+				row.countLabel:AddAnchor("TOP", row, 0, runtime:Scale(26))
 				row.countLabel.style:SetFontSize(runtime:Scale(9))
+			end
+			if row.sessionAcquiredLabel ~= nil then
+				row.sessionAcquiredLabel:SetExtent(boxSize - runtime:Scale(5), runtime:Scale(13))
+				row.sessionAcquiredLabel:RemoveAllAnchors()
+				row.sessionAcquiredLabel:AddAnchor("TOP", row, 0, runtime:Scale(13))
+				row.sessionAcquiredLabel.style:SetFontSize(runtime:Scale(9))
+				ApplyTrackedSessionCountTextColor(row.sessionAcquiredLabel)
+			end
+			if row.dropRateLabel ~= nil then
+				row.dropRateLabel:SetExtent(boxSize - runtime:Scale(2), runtime:Scale(CONFIG.TRACKED_DROP_RATE_LABEL_HEIGHT))
+				row.dropRateLabel:RemoveAllAnchors()
+				row.dropRateLabel:AddAnchor("TOP", row, 0, 0)
+				row.dropRateLabel.style:SetFontSize(runtime:Scale(CONFIG.TRACKED_DROP_RATE_LABEL_FONT_SIZE))
+				ApplyTrackedDropRateTextColor(row.dropRateLabel)
 			end
 		end
 	end
@@ -2686,20 +3093,44 @@ function runtime:CreateTrackerRow(index)
 	nameLabel.style:SetColor(0.98, 0.98, 0.98, 1)
 	nameLabel.style:SetOutline(true)
 	nameLabel:AddAnchor("TOP", row, 0, runtime:Scale(5))
+	nameLabel:Show(false)
 	SafeMethod(nameLabel, "EnablePick", false)
 	row.nameLabel = nameLabel
 
 	local countLabel = row:CreateChildWidget("label", "lootTrackerRowCount" .. tostring(index), 0, true)
 	countLabel:SetText("")
-	countLabel:SetExtent(runtime:Scale(CONFIG.BOX_SIZE - 5), runtime:Scale(15))
+	countLabel:SetExtent(runtime:Scale(CONFIG.BOX_SIZE - 5), runtime:Scale(13))
 	countLabel.style:SetAlign(ALIGN_CENTER)
 	countLabel.style:SetFontSize(runtime:Scale(9))
 	countLabel.style:SetColor(0.92, 0.86, 0.62, 1)
 	countLabel.style:SetOutline(true)
 	-- Sets hover state to true for the row on mouse enter.
-	countLabel:AddAnchor("BOTTOM", row, 0, -runtime:Scale(3))
+	countLabel:AddAnchor("TOP", row, 0, runtime:Scale(26))
 	SafeMethod(countLabel, "EnablePick", false)
 	row.countLabel = countLabel
+
+	local sessionAcquiredLabel = row:CreateChildWidget("label", "lootTrackerRowSessionCount" .. tostring(index), 0, true)
+	sessionAcquiredLabel:SetText("")
+	sessionAcquiredLabel:SetExtent(runtime:Scale(CONFIG.BOX_SIZE - 5), runtime:Scale(13))
+	sessionAcquiredLabel.style:SetAlign(ALIGN_CENTER)
+	sessionAcquiredLabel.style:SetFontSize(runtime:Scale(9))
+	sessionAcquiredLabel.style:SetOutline(true)
+	ApplyTrackedSessionCountTextColor(sessionAcquiredLabel)
+	sessionAcquiredLabel:AddAnchor("TOP", row, 0, runtime:Scale(13))
+	SafeMethod(sessionAcquiredLabel, "EnablePick", false)
+	row.sessionAcquiredLabel = sessionAcquiredLabel
+
+	local dropRateLabel = row:CreateChildWidget("label", "lootTrackerRowDropRate" .. tostring(index), 0, true)
+	dropRateLabel:SetText("")
+	dropRateLabel:SetExtent(runtime:Scale(CONFIG.BOX_SIZE - 2), runtime:Scale(CONFIG.TRACKED_DROP_RATE_LABEL_HEIGHT))
+	dropRateLabel.style:SetAlign(ALIGN_CENTER)
+	dropRateLabel.style:SetFontSize(runtime:Scale(CONFIG.TRACKED_DROP_RATE_LABEL_FONT_SIZE))
+	dropRateLabel.style:SetOutline(true)
+	ApplyTrackedDropRateTextColor(dropRateLabel)
+	dropRateLabel:AddAnchor("TOP", row, 0, 0)
+	dropRateLabel:Show(false)
+	SafeMethod(dropRateLabel, "EnablePick", false)
+	row.dropRateLabel = dropRateLabel
 
 	function row:OnEnter()
 		-- Sets hover state to true for the row on mouse enter.
@@ -4551,6 +4982,12 @@ local watchedEvents = {
 	CHAT_FAILED = true,
 }
 
+local dropRateLootActivityEvents = {
+	ADDED_ITEM = true,
+	ITEM_ACQUISITION_BY_LOOT = true,
+	SHOW_ADDED_ITEM = true,
+}
+
 local function IsLootTrackerResetCommandText(value)
 	if type(value) ~= "string" then
 		return false
@@ -4586,6 +5023,12 @@ end
 function trackerWindow:OnEvent(event)
 	if watchedEvents[event] then
 		MarkInventoryDirty(false)
+	end
+	if dropRateLootActivityEvents[event] then
+		local currentKills = GetCurrentSessionKillTotal()
+		if currentKills ~= nil and currentKills > 0 then
+			runtime:MarkDropRateLootActivity()
+		end
 	end
 end
 trackerWindow:SetHandler("OnEvent", trackerWindow.OnEvent)
@@ -4645,6 +5088,8 @@ function trackerWindow:OnUpdate(dt)
 	end
 
 	runtime:UpdateAcquisitionGlows(delta)
+	runtime:UpdateTrackedDropRates(delta)
+	runtime:UpdateTrackedSessionAcquiredCounts(delta)
 
 	if refreshRequested then
 		refreshRequested = false

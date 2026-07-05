@@ -59,8 +59,8 @@ local DAMAGE_RECENT_SECONDS = 20
 local TARGET_CACHE_SECONDS = 12
 local LOOT_ATTRIBUTION_SECONDS = 20
 local EXP_ATTRIBUTION_SECONDS = 8
-local COMBAT_IDLE_TIMEOUT = 6
-local PLAYER_COMBAT_EXIT_GRACE = 1.5
+local COMBAT_IDLE_TIMEOUT = 10
+local EXP_COMBAT_LOG_TIMEOUT = 10
 local PENDING_CAPTURE_DEDUPE_SECONDS = 0.35
 local MONEY_EVENT_DEDUPE_SECONDS = 0.35
 local MAX_PENDING_HITS_PER_TARGET = 4
@@ -293,6 +293,7 @@ local runtime = {
 	sessionKillLocations = {},
 	playerCombatStats = {},
 	itemDropsByUnit = {},
+	sessionLootItems = {},
 	expByUnit = {},
 	recentKillExpValues = {},
 	totalDamageDealt = 0,
@@ -311,6 +312,9 @@ local runtime = {
 	combatActive = false,
 	combatStart = nil,
 	lastCombatActivity = nil,
+	lastCombatLogTime = nil,
+	lastCombatLogMobName = nil,
+	lastCombatLogSourceName = nil,
 	totalKillTime = 0,
 	sessionStartTime = nil,
 	lastDamage = nil,
@@ -320,6 +324,8 @@ local runtime = {
 	recentDamageByTarget = {},
 	targetSnapshotsByName = {},
 	pendingTargetHitsByKey = {},
+	recentNpcDeathTimes = {},
+	expKillCandidates = {},
 	currentTargetName = nil,
 	currentTargetKey = nil,
 	currentTargetHealth = nil,
@@ -370,6 +376,9 @@ Analysis.HISTORY_TEXT_WRAP_CHARS = math.max(32, math.floor((VIEW_WINDOW_WIDTH - 
 Analysis.RECENT_KILL_EXP_LIMIT = 20
 Analysis.AEK_KILL_WINDOW = 5
 Analysis.PLAYER_DEATH_DEDUPE_SECONDS = 5
+Analysis.NPC_DEATH_EVENT_DEDUPE_SECONDS = 3
+Analysis.EXP_KILL_CANDIDATE_SECONDS = 10
+Analysis.EXP_KILL_CANDIDATE_LIMIT = 30
 Analysis.KILL_MAP_COMMON_COORD_TOLERANCE = 54
 Analysis.KILL_MAP_COMMON_MARKER_RADIUS = 24
 Analysis.KILL_MAP_EFFECT_LIMIT = 18
@@ -459,6 +468,114 @@ local function IsValidName(value)
 	return type(value) == "string" and Trim(value) ~= ""
 end
 
+function Analysis.NormalizeLootCount(count)
+	count = math.floor((tonumber(count) or 1) + 0.5)
+	if count < 1 then
+		count = 1
+	end
+	return count
+end
+
+function Analysis.IsCurrencyLootItemName(itemName)
+	if not IsValidName(itemName) then
+		return false
+	end
+	local name = NormalizeName(itemName)
+	if name == "gold" or name == "silver" or name == "copper" or name == "money" then
+		return true
+	end
+	if Analysis.ParseMoneyCopper ~= nil and Analysis.ParseMoneyCopper(itemName) ~= nil then
+		return true
+	end
+	return false
+end
+
+function Analysis.AddLootAmount(amountsByItem, itemName, count)
+	if type(amountsByItem) ~= "table" or not IsValidName(itemName) then
+		return false
+	end
+	itemName = Trim(itemName)
+	if Analysis.IsCurrencyLootItemName(itemName) then
+		return false
+	end
+	count = Analysis.NormalizeLootCount(count)
+	amountsByItem[itemName] = (tonumber(amountsByItem[itemName]) or 0) + count
+	return true
+end
+
+function Analysis.BuildSessionLootItemsFromUnitDrops(itemDropsByUnit)
+	local lootItems = {}
+	if type(itemDropsByUnit) ~= "table" then
+		return lootItems
+	end
+	for _, drops in pairs(itemDropsByUnit) do
+		if type(drops) == "table" then
+			for itemName, count in pairs(drops) do
+				if IsValidName(itemName) and tonumber(count) ~= nil and tonumber(count) > 0 then
+					Analysis.AddLootAmount(lootItems, itemName, count)
+				end
+			end
+		end
+	end
+	return lootItems
+end
+
+function Analysis.NormalizeLootItems(lootItems)
+	local normalized = {}
+	if type(lootItems) ~= "table" then
+		return normalized
+	end
+	for itemName, count in pairs(lootItems) do
+		if IsValidName(itemName) and tonumber(count) ~= nil and tonumber(count) > 0 then
+			Analysis.AddLootAmount(normalized, itemName, count)
+		end
+	end
+	return normalized
+end
+
+function Analysis.GetLootItemTotal(lootItems)
+	local total = 0
+	if type(lootItems) ~= "table" then
+		return total
+	end
+	for itemName, count in pairs(lootItems) do
+		count = tonumber(count)
+		if IsValidName(itemName) and not Analysis.IsCurrencyLootItemName(itemName) and count ~= nil and count > 0 then
+			total = total + math.floor(count)
+		end
+	end
+	return total
+end
+
+function Analysis.MergeLootItemMaximums(target, source)
+	if type(target) ~= "table" or type(source) ~= "table" then
+		return false
+	end
+	local changed = false
+	for itemName, count in pairs(source) do
+		count = tonumber(count)
+		if IsValidName(itemName) and not Analysis.IsCurrencyLootItemName(itemName) and count ~= nil and count > 0 then
+			itemName = Trim(itemName)
+			if count > (tonumber(target[itemName]) or 0) then
+				target[itemName] = Analysis.NormalizeLootCount(count)
+				changed = true
+			end
+		end
+	end
+	return changed
+end
+
+function Analysis.EnsureSessionLootItems()
+	if type(runtime.sessionLootItems) ~= "table" then
+		runtime.sessionLootItems = {}
+	end
+	local rebuilt = Analysis.BuildSessionLootItemsFromUnitDrops(runtime.itemDropsByUnit)
+	if Analysis.GetLootItemTotal(rebuilt) > 0 then
+		Analysis.MergeLootItemMaximums(runtime.sessionLootItems, rebuilt)
+	end
+	return runtime.sessionLootItems
+end
+
 local function NamesMatch(left, right)
 	if not IsValidName(left) or not IsValidName(right) then
 		return false
@@ -484,6 +601,88 @@ local function SafeUnitName(unit)
 		return nil
 	end
 	return name
+end
+
+function Analysis.NormalizeUnitId(unitId)
+	local text = Trim(tostring(unitId or ""))
+	if text == "" or text == "0" or NormalizeName(text) == "nil" then
+		return nil
+	end
+	return text
+end
+
+function Analysis.GetCurrentTargetUnitId()
+	local ok, unitId = SafeCall(X2Unit, "GetTargetUnitId")
+	unitId = ok and Analysis.NormalizeUnitId(unitId) or nil
+	if unitId ~= nil then
+		return unitId
+	end
+
+	ok, unitId = SafeCall(X2Unit, "GetUnitId", "target")
+	unitId = ok and Analysis.NormalizeUnitId(unitId) or nil
+	if unitId ~= nil then
+		return unitId
+	end
+	return nil
+end
+
+function Analysis.BuildTargetKey(unitId, targetName)
+	unitId = Analysis.NormalizeUnitId(unitId)
+	if unitId ~= nil then
+		return "id:" .. unitId
+	end
+	if IsValidName(targetName) then
+		return NormalizeName(targetName)
+	end
+	return nil
+end
+
+function Analysis.IsUnitTargetKey(targetKey)
+	return type(targetKey) == "string" and string.sub(targetKey, 1, 3) == "id:"
+end
+
+function Analysis.GetLocalPlayerUnitId()
+	local ok, unitId = SafeCall(X2Unit, "GetUnitId", "player")
+	unitId = ok and Analysis.NormalizeUnitId(unitId) or nil
+	return unitId
+end
+
+function Analysis.IsLocalPlayerUnitId(unitId)
+	unitId = Analysis.NormalizeUnitId(unitId)
+	if unitId == nil then
+		return false
+	end
+	if unitId == "player" then
+		return true
+	end
+	return unitId == Analysis.GetLocalPlayerUnitId()
+end
+
+function Analysis.GetUnitInfoById(unitId)
+	unitId = Analysis.NormalizeUnitId(unitId)
+	if unitId == nil then
+		return nil
+	end
+	local ok, unitInfo = SafeCall(X2Unit, "GetUnitInfoById", unitId)
+	if ok and type(unitInfo) == "table" then
+		return unitInfo
+	end
+	return nil
+end
+
+function Analysis.GetUnitNameById(unitId, unitInfo)
+	if type(unitInfo) == "table" and IsValidName(unitInfo.name) then
+		return Trim(unitInfo.name)
+	end
+	unitId = Analysis.NormalizeUnitId(unitId)
+	if unitId == nil then
+		return nil
+	end
+	local ok, unitName = SafeCall(X2Unit, "GetUnitNameById", unitId)
+	if ok and IsValidName(unitName) then
+		return Trim(unitName)
+	end
+	return nil
 end
 
 local function SafeUnitValue(methodName, unit)
@@ -602,6 +801,17 @@ function Analysis.IsAlliedPlayerName(name)
 		Analysis.RefreshAllyPlayerNames()
 	end
 	return runtime.allyPlayerNames[key] == true
+end
+
+function Analysis.IsNpcExpTarget(unitId, targetName)
+	if not IsValidName(targetName) or IsLocalPlayerName(targetName) or Analysis.IsAlliedPlayerName(targetName) then
+		return false
+	end
+	local unitInfo = Analysis.GetUnitInfoById(unitId)
+	if type(unitInfo) == "table" and unitInfo.type == "character" then
+		return false
+	end
+	return true
 end
 
 function Analysis.MarkPlayerDeathCounterName(name)
@@ -994,6 +1204,10 @@ local function LoadKillCounts()
 	if type(data.itemDropsByUnit) == "table" then
 		runtime.itemDropsByUnit = data.itemDropsByUnit
 	end
+	if type(data.sessionLootItems) == "table" then
+		runtime.sessionLootItems = Analysis.NormalizeLootItems(data.sessionLootItems)
+	end
+	Analysis.EnsureSessionLootItems()
 	if type(data.expByUnit) == "table" then
 		runtime.expByUnit = data.expByUnit
 	end
@@ -1002,7 +1216,7 @@ local function LoadKillCounts()
 	end
 	runtime.totalDamageDealt = tonumber(data.totalDamageDealt) or runtime.totalDamageDealt
 	runtime.totalDamageTaken = tonumber(data.totalDamageTaken) or runtime.totalDamageTaken
-	runtime.totalDroppedItems = tonumber(data.totalDroppedItems) or runtime.totalDroppedItems
+	runtime.totalDroppedItems = Analysis.GetLootItemTotal(runtime.sessionLootItems)
 	runtime.totalExpGained = tonumber(data.totalExpGained) or runtime.totalExpGained
 	runtime.totalGoldEarned = tonumber(data.totalGoldEarned) or runtime.totalGoldEarned
 	runtime.totalManaSpent = tonumber(data.totalManaSpent) or runtime.totalManaSpent
@@ -1048,6 +1262,7 @@ local function SaveKillCounts()
 		sessionKillLocations = runtime.sessionKillLocations,
 		playerCombatStats = runtime.playerCombatStats,
 		itemDropsByUnit = runtime.itemDropsByUnit,
+		sessionLootItems = runtime.sessionLootItems,
 		expByUnit = runtime.expByUnit,
 		recentKillExpValues = runtime.recentKillExpValues,
 		totalDamageDealt = runtime.totalDamageDealt,
@@ -1227,7 +1442,8 @@ function Analysis.ApplyExpToRecentKill(amount)
 
 	local now = RefreshClock()
 	local targetEntry = nil
-	for _, entry in ipairs(runtime.recentKillExpValues) do
+	for index = #runtime.recentKillExpValues, 1, -1 do
+		local entry = runtime.recentKillExpValues[index]
 		if type(entry) == "table"
 			and entry.pending == true
 			and now - (tonumber(entry.time) or 0) <= EXP_ATTRIBUTION_SECONDS
@@ -1854,6 +2070,22 @@ function Analysis.ParseCombatMessage(...)
 	}
 end
 
+function Analysis.ParseCombatTextMessage(...)
+	return {
+		sourceUnitId = Analysis.NormalizeUnitId(select(1, ...)),
+		targetUnitId = Analysis.NormalizeUnitId(select(2, ...)),
+		amount = tonumber(select(3, ...)),
+		hitType = Trim(tostring(select(6, ...) or "")),
+	}
+end
+
+function Analysis.IsDamageCombatText(msg)
+	if type(msg) ~= "table" or tonumber(msg.amount) == nil or tonumber(msg.amount) <= 0 then
+		return false
+	end
+	return msg.hitType == "" or msg.hitType == "HIT" or msg.hitType == "CRITICAL"
+end
+
 function Analysis.NormalizeAbilityName(abilityName, eventType, abilityId)
 	abilityName = Trim(abilityName or "")
 	if abilityName == "HEALTH" then
@@ -2211,6 +2443,15 @@ function Analysis.EndKillCombatSession(now)
 	end
 end
 
+function Analysis.RememberCombatLogTarget(mobName, sourceName)
+	if IsValidName(mobName) and not IsLocalPlayerName(mobName) and not Analysis.IsAlliedPlayerName(mobName) then
+		runtime.lastCombatLogMobName = Trim(mobName)
+	end
+	if IsValidName(sourceName) then
+		runtime.lastCombatLogSourceName = Trim(sourceName)
+	end
+end
+
 function Analysis.TouchKillCombatActivity(now)
 	now = now or RefreshClock()
 	if not runtime.combatActive then
@@ -2218,6 +2459,13 @@ function Analysis.TouchKillCombatActivity(now)
 		return
 	end
 	runtime.lastCombatActivity = now
+end
+
+function Analysis.TouchCombatLogActivity(mobName, sourceName, now)
+	now = now or RefreshClock()
+	runtime.lastCombatLogTime = now
+	Analysis.RememberCombatLogTarget(mobName, sourceName)
+	Analysis.TouchKillCombatActivity(now)
 end
 
 function Analysis.EvaluateKillCombatEnd(now)
@@ -2232,10 +2480,6 @@ function Analysis.EvaluateKillCombatEnd(now)
 	end
 	local idle = now - lastActivity
 	if idle >= COMBAT_IDLE_TIMEOUT then
-		Analysis.EndKillCombatSession(now)
-		return
-	end
-	if not Analysis.IsPlayerInCombat() and idle >= PLAYER_COMBAT_EXIT_GRACE then
 		Analysis.EndKillCombatSession(now)
 	end
 end
@@ -2259,28 +2503,36 @@ end
 
 function Analysis.RecordDroppedItem(mobName, itemName, count)
 	if not IsValidName(itemName) then
-		return
+		return false
+	end
+	itemName = Trim(itemName)
+	if Analysis.IsCurrencyLootItemName(itemName) then
+		return false
 	end
 	if not IsValidName(mobName) then
 		mobName = "Unknown"
 	else
 		mobName = Trim(mobName)
 	end
-	itemName = Trim(itemName)
-	count = math.floor((tonumber(count) or 1) + 0.5)
-	if count < 1 then
-		count = 1
-	end
+	count = Analysis.NormalizeLootCount(count)
 	if runtime.itemDropsByUnit[mobName] == nil then
 		runtime.itemDropsByUnit[mobName] = {}
 	end
-	runtime.itemDropsByUnit[mobName][itemName] =
-		(tonumber(runtime.itemDropsByUnit[mobName][itemName]) or 0) + count
+	if type(runtime.sessionLootItems) ~= "table" then
+		runtime.sessionLootItems = {}
+	end
+	if not Analysis.AddLootAmount(runtime.itemDropsByUnit[mobName], itemName, count) then
+		return false
+	end
+	if not Analysis.AddLootAmount(runtime.sessionLootItems, itemName, count) then
+		return false
+	end
 	runtime.totalDroppedItems = (tonumber(runtime.totalDroppedItems) or 0) + count
 	Analysis.MarkSessionDataSavePending()
 	if RefreshViewWindowIfVisible ~= nil then
 		RefreshViewWindowIfVisible()
 	end
+	return true
 end
 
 Analysis.LOOT_ITEM_TABLE_FIELDS = {
@@ -2383,11 +2635,8 @@ function Analysis.BuildBagSnapshot()
 	for posInBag = 1, MAX_BAG_SLOTS do
 		local bagItem = Analysis.ReadBagItem(posInBag)
 		local item = Analysis.ExtractLootItemFromTable(bagItem, 0)
-		if item ~= nil and IsValidName(item.name) then
-			local count = math.floor((tonumber(item.count) or 1) + 0.5)
-			if count < 1 then
-				count = 1
-			end
+		if item ~= nil and IsValidName(item.name) and not Analysis.IsCurrencyLootItemName(item.name) then
+			local count = Analysis.NormalizeLootCount(item.count)
 			local itemName = Trim(item.name)
 			snapshot[itemName] = (tonumber(snapshot[itemName]) or 0) + count
 		end
@@ -2407,8 +2656,7 @@ function Analysis.SyncBagDrops(baselineOnly)
 		for itemName, count in pairs(snapshot) do
 			local previousCount = tonumber(runtime.lastBagSnapshot[itemName]) or 0
 			local gained = (tonumber(count) or 0) - previousCount
-			if gained > 0 then
-				Analysis.RecordDroppedItem(mobName, itemName, gained)
+			if gained > 0 and Analysis.RecordDroppedItem(mobName, itemName, gained) then
 				recorded = true
 			end
 		end
@@ -2450,13 +2698,16 @@ function Analysis.RecordLootFromEventPayload(...)
 	if item == nil or not IsValidName(item.name) then
 		return false
 	end
-	Analysis.RecordDroppedItem(Analysis.GetRecentMobName(LOOT_ATTRIBUTION_SECONDS), item.name, item.count)
-	return true
+	return Analysis.RecordDroppedItem(Analysis.GetRecentMobName(LOOT_ATTRIBUTION_SECONDS), item.name, item.count)
 end
 
 function Analysis.HandleLootAcquisitionEvent(...)
-	local recordedFromBag = Analysis.SyncBagDrops(false)
+	local hasBagBaseline = type(runtime.lastBagSnapshot) == "table"
+	local recordedFromBag = false
 	local recordedFromPayload = false
+	if hasBagBaseline then
+		recordedFromBag = Analysis.SyncBagDrops(false)
+	end
 	if not recordedFromBag then
 		recordedFromPayload = Analysis.RecordLootFromEventPayload(...)
 	end
@@ -2464,7 +2715,11 @@ function Analysis.HandleLootAcquisitionEvent(...)
 		runtime.pendingBagSyncUntil = nil
 		Analysis.SyncBagDrops(true)
 	else
-		Analysis.ScheduleBagDropSync()
+		if hasBagBaseline then
+			Analysis.ScheduleBagDropSync()
+		else
+			Analysis.SyncBagDrops(true)
+		end
 	end
 end
 
@@ -2879,9 +3134,15 @@ function Analysis.AttributeExpGain(amount)
 	if amount <= 0 then
 		return false
 	end
+	if Analysis.CountKillFromExpGain == nil then
+		return false
+	end
+	local mobName, counted = Analysis.CountKillFromExpGain(amount)
+	if counted ~= true then
+		return false
+	end
 	runtime.totalExpGained = (tonumber(runtime.totalExpGained) or 0) + amount
-	Analysis.AddAmount(runtime.expByUnit, Analysis.GetRecentMobName(EXP_ATTRIBUTION_SECONDS), amount)
-	Analysis.ApplyExpToRecentKill(amount)
+	Analysis.AddAmount(runtime.expByUnit, mobName, amount)
 	Analysis.MarkSessionDataSavePending()
 	if RefreshViewWindowIfVisible ~= nil then
 		RefreshViewWindowIfVisible()
@@ -2992,7 +3253,6 @@ function Analysis.RecordSessionDamage(sourceName, targetName, damageAmount)
 		targetName = Trim(targetName)
 		Analysis.AddAmount(runtime.damageDealtByUnit, targetName, damageAmount)
 		runtime.totalDamageDealt = (tonumber(runtime.totalDamageDealt) or 0) + damageAmount
-		Analysis.TouchKillCombatActivity()
 		recorded = true
 	end
 	if targetIsPlayer and not sourceIsPlayer and IsValidName(sourceName) then
@@ -3116,6 +3376,7 @@ function Analysis.ClearSessionStats()
 	runtime.sessionKillLocations = {}
 	runtime.playerCombatStats = {}
 	runtime.itemDropsByUnit = {}
+	runtime.sessionLootItems = {}
 	runtime.expByUnit = {}
 	runtime.recentKillExpValues = {}
 	runtime.totalDamageDealt = 0
@@ -3129,6 +3390,9 @@ function Analysis.ClearSessionStats()
 	runtime.combatActive = false
 	runtime.combatStart = nil
 	runtime.lastCombatActivity = nil
+	runtime.lastCombatLogTime = nil
+	runtime.lastCombatLogMobName = nil
+	runtime.lastCombatLogSourceName = nil
 	runtime.sessionLocationText = nil
 	runtime.loadingStartLocationText = nil
 	runtime.locationRefreshElapsed = 0
@@ -3136,6 +3400,8 @@ function Analysis.ClearSessionStats()
 	runtime.pendingBagSyncUntil = nil
 	runtime.localPlayerName = nil
 	runtime.recentPlayerDeathTimes = {}
+	runtime.recentNpcDeathTimes = {}
+	runtime.expKillCandidates = {}
 	Analysis.ResetLocalPlayerDeathTracking()
 	runtime.lastPlayerMana = nil
 	runtime.lastMoneySnapshot = nil
@@ -3270,17 +3536,22 @@ local function CountSnapshotKill(snapshot, mobName, killerName)
 	if runtime.currentTargetKey ~= nil and runtime.currentTargetKey == mobKey then
 		runtime.currentTargetDeathCounted = true
 	end
+	Analysis.MarkRecentNpcDeathKey(mobKey, now)
 	if RemovePendingTargetHitsByKey ~= nil then
 		RemovePendingTargetHitsByKey(mobKey)
 	end
-
-	CountKill(mobName, killerName)
+	if snapshot == nil or Analysis.IsNpcExpTarget(snapshot.unitId, mobName) then
+		Analysis.RememberCombatLogTarget(mobName, killerName)
+	end
 end
 
-local function FindKillerForTarget(targetName)
+local function FindKillerForTarget(targetName, targetKey)
 	local now = RefreshClock()
-	local targetKey = NormalizeName(targetName)
-	local damage = runtime.recentDamageByTarget[targetKey]
+	local damage = targetKey ~= nil and runtime.recentDamageByTarget[targetKey] or nil
+	if damage == nil then
+		local nameKey = Analysis.BuildTargetKey(nil, targetName)
+		damage = nameKey ~= nil and runtime.recentDamageByTarget[nameKey] or nil
+	end
 	if damage ~= nil and now - damage.time <= DAMAGE_RECENT_SECONDS then
 		return damage.sourceName
 	end
@@ -3290,6 +3561,211 @@ local function FindKillerForTarget(targetName)
 	end
 
 	return SafeUnitName("player") or "Unknown"
+end
+
+function Analysis.PruneRecentNpcDeathTimes(now)
+	now = now or RefreshClock()
+	for targetKey, deathTime in pairs(runtime.recentNpcDeathTimes) do
+		if now - (tonumber(deathTime) or 0) > Analysis.NPC_DEATH_EVENT_DEDUPE_SECONDS then
+			runtime.recentNpcDeathTimes[targetKey] = nil
+		end
+	end
+end
+
+function Analysis.MarkRecentNpcDeathKey(targetKey, now)
+	if not Analysis.IsUnitTargetKey(targetKey) then
+		return
+	end
+	runtime.recentNpcDeathTimes[targetKey] = now or RefreshClock()
+end
+
+function Analysis.WasRecentNpcDeathKeyCounted(targetKey, now)
+	if not Analysis.IsUnitTargetKey(targetKey) then
+		return false
+	end
+	now = now or RefreshClock()
+	local deathTime = tonumber(runtime.recentNpcDeathTimes[targetKey])
+	return deathTime ~= nil and now - deathTime <= Analysis.NPC_DEATH_EVENT_DEDUPE_SECONDS
+end
+
+function Analysis.PruneExpKillCandidates(now)
+	now = now or RefreshClock()
+	if type(runtime.expKillCandidates) ~= "table" then
+		runtime.expKillCandidates = {}
+		return
+	end
+	for index = #runtime.expKillCandidates, 1, -1 do
+		local entry = runtime.expKillCandidates[index]
+		if type(entry) ~= "table"
+			or entry.used == true
+			or now - (tonumber(entry.time) or 0) > Analysis.EXP_KILL_CANDIDATE_SECONDS
+		then
+			table.remove(runtime.expKillCandidates, index)
+		end
+	end
+	while #runtime.expKillCandidates > Analysis.EXP_KILL_CANDIDATE_LIMIT do
+		table.remove(runtime.expKillCandidates, 1)
+	end
+end
+
+function Analysis.AddExpKillCandidate(targetName, targetKey, sourceName)
+	if not IsValidName(targetName) or IsLocalPlayerName(targetName) or Analysis.IsAlliedPlayerName(targetName) then
+		return
+	end
+	if not IsLocalPlayerName(sourceName) then
+		return
+	end
+	if type(runtime.expKillCandidates) ~= "table" then
+		runtime.expKillCandidates = {}
+	end
+	local now = RefreshClock()
+	Analysis.PruneExpKillCandidates(now)
+	for _, entry in ipairs(runtime.expKillCandidates) do
+		if type(entry) == "table"
+			and targetKey ~= nil
+			and entry.targetKey == targetKey
+			and entry.used ~= true
+		then
+			entry.targetName = Trim(targetName)
+			entry.sourceName = Trim(sourceName)
+			entry.time = now
+			return
+		end
+	end
+	runtime.expKillCandidates[#runtime.expKillCandidates + 1] = {
+		targetName = Trim(targetName),
+		targetKey = targetKey,
+		sourceName = Trim(sourceName),
+		time = now,
+		used = false,
+	}
+	Analysis.PruneExpKillCandidates(now)
+end
+
+function Analysis.TakeExpKillCandidate(now)
+	now = now or RefreshClock()
+	Analysis.PruneExpKillCandidates(now)
+	for index = #runtime.expKillCandidates, 1, -1 do
+		local entry = runtime.expKillCandidates[index]
+		if type(entry) == "table"
+			and entry.used ~= true
+			and IsValidName(entry.targetName)
+			and now - (tonumber(entry.time) or 0) <= Analysis.EXP_KILL_CANDIDATE_SECONDS
+		then
+			entry.used = true
+			table.remove(runtime.expKillCandidates, index)
+			return entry
+		end
+	end
+	return nil
+end
+
+function Analysis.GetExpKillCandidateCount(now)
+	now = now or RefreshClock()
+	Analysis.PruneExpKillCandidates(now)
+	local count = 0
+	for _, entry in ipairs(runtime.expKillCandidates) do
+		if type(entry) == "table"
+			and entry.used ~= true
+			and IsValidName(entry.targetName)
+			and now - (tonumber(entry.time) or 0) <= Analysis.EXP_KILL_CANDIDATE_SECONDS
+		then
+			count = count + 1
+		end
+	end
+	return count
+end
+
+function Analysis.GetExpKillBatchLimit(amount, candidateCount, now)
+	amount = math.floor((tonumber(amount) or 0) + 0.5)
+	candidateCount = math.floor((tonumber(candidateCount) or 0) + 0.5)
+	if amount <= 0 or candidateCount <= 0 then
+		return 0
+	end
+	if candidateCount == 1 then
+		return 1
+	end
+
+	local averageExpPerKill = Analysis.GetAverageExpPerKill(now or RefreshClock())
+	if averageExpPerKill <= 0 then
+		return 1
+	end
+
+	local limit = math.floor((amount / averageExpPerKill) + 0.25)
+	if limit < 1 then
+		limit = 1
+	elseif limit > candidateCount then
+		limit = candidateCount
+	end
+	return limit
+end
+
+function Analysis.RemoveExpKillCandidatesForTarget(targetKey, targetName)
+	if type(runtime.expKillCandidates) ~= "table" then
+		return
+	end
+	local removedNameMatch = false
+	local allowNameFallback = not Analysis.IsUnitTargetKey(targetKey)
+	for index = #runtime.expKillCandidates, 1, -1 do
+		local entry = runtime.expKillCandidates[index]
+		local remove = false
+		if type(entry) == "table" then
+			if targetKey ~= nil and entry.targetKey == targetKey then
+				remove = true
+			elseif allowNameFallback and not removedNameMatch and IsValidName(targetName) and NamesMatch(entry.targetName, targetName) then
+				remove = true
+				removedNameMatch = true
+			end
+		else
+			remove = true
+		end
+		if remove then
+			table.remove(runtime.expKillCandidates, index)
+		end
+	end
+end
+
+function Analysis.ApplyExpToRecentKillBatch(amount, killCount)
+	amount = math.floor((tonumber(amount) or 0) + 0.5)
+	killCount = math.floor((tonumber(killCount) or 0) + 0.5)
+	if amount <= 0 or killCount <= 0 or type(runtime.recentKillExpValues) ~= "table" then
+		return false
+	end
+	if killCount <= 1 then
+		return Analysis.ApplyExpToRecentKill(amount)
+	end
+
+	local now = RefreshClock()
+	local entries = {}
+	for index = #runtime.recentKillExpValues, 1, -1 do
+		local entry = runtime.recentKillExpValues[index]
+		if type(entry) == "table"
+			and entry.pending == true
+			and now - (tonumber(entry.time) or 0) <= EXP_ATTRIBUTION_SECONDS
+		then
+			entries[#entries + 1] = entry
+			if #entries >= killCount then
+				break
+			end
+		end
+	end
+	if #entries <= 0 then
+		return false
+	end
+
+	local expPerEntry = math.floor(amount / #entries)
+	local remainder = amount - (expPerEntry * #entries)
+	for index = #entries, 1, -1 do
+		local entry = entries[index]
+		local entryExp = expPerEntry
+		if remainder > 0 then
+			entryExp = entryExp + 1
+			remainder = remainder - 1
+		end
+		entry.exp = (tonumber(entry.exp) or 0) + entryExp
+		entry.pending = false
+	end
+	return true
 end
 
 local function GetTargetSnapshotByKey(targetKey)
@@ -3408,11 +3884,76 @@ local function CountPendingTargetKill(entry, sourceName)
 	entry.remainingHealth = 0
 	entry.updatedTime = now
 	MarkSnapshotCountedByKey(entry.key)
+	Analysis.MarkRecentNpcDeathKey(entry.key, now)
 	if RemovePendingTargetHitsByKey ~= nil then
 		RemovePendingTargetHitsByKey(entry.key)
 	end
-	CountKill(entry.displayName, sourceName)
+	if Analysis.IsNpcExpTarget(entry.unitId, entry.displayName) then
+		Analysis.RememberCombatLogTarget(entry.displayName, sourceName)
+	end
 	return true
+end
+
+function Analysis.HasRecentCombatLogForExp(now)
+	now = now or RefreshClock()
+	local lastLog = tonumber(runtime.lastCombatLogTime) or tonumber(runtime.lastCombatActivity)
+	return lastLog ~= nil and now - lastLog <= EXP_COMBAT_LOG_TIMEOUT
+end
+
+-- EXP is the authoritative NPC kill signal. Recent local-player combat logs only
+-- open a short attribution window so delayed quest/craft EXP does not count.
+function Analysis.ResolveExpKillAttribution(now)
+	now = now or RefreshClock()
+	local candidate = Analysis.TakeExpKillCandidate(now)
+	if type(candidate) == "table" and IsValidName(candidate.targetName) then
+		return candidate.targetName, candidate.sourceName, candidate.targetKey
+	end
+	if IsValidName(runtime.lastCombatLogMobName) then
+		return runtime.lastCombatLogMobName, runtime.lastCombatLogSourceName, nil
+	end
+	if IsValidName(runtime.currentTargetName) then
+		return runtime.currentTargetName, runtime.lastCombatLogSourceName, runtime.currentTargetKey
+	end
+	return "Unknown", runtime.lastCombatLogSourceName, nil
+end
+
+function Analysis.CountKillFromExpGain(amount)
+	amount = math.floor((tonumber(amount) or 0) + 0.5)
+	if amount <= 0 then
+		return nil, false
+	end
+	local now = RefreshClock()
+	if not Analysis.HasRecentCombatLogForExp(now) then
+		return nil, false
+	end
+
+	local mobName, sourceName, targetKey = Analysis.ResolveExpKillAttribution(now)
+	if not IsValidName(mobName) then
+		mobName = "Unknown"
+	end
+	if not IsValidName(sourceName) then
+		sourceName = GetLocalPlayerName() or "Unknown"
+	end
+	if targetKey ~= nil then
+		MarkSnapshotCountedByKey(targetKey)
+		if RemovePendingTargetHitsByKey ~= nil then
+			RemovePendingTargetHitsByKey(targetKey)
+		end
+	end
+	CountKill(mobName, sourceName)
+	Analysis.ApplyExpToRecentKill(amount)
+	return mobName, true
+end
+
+function Analysis.CountMissingKillsFromExp(amount)
+	local mobName, counted = Analysis.CountKillFromExpGain(amount)
+	return mobName, counted and 1 or 0
+end
+
+function Analysis.CountMissingKillFromExp(amount)
+	local mobName = nil
+	mobName = Analysis.CountMissingKillsFromExp(amount)
+	return mobName
 end
 
 local function PrunePendingTargetHits()
@@ -3509,7 +4050,7 @@ local function MarkPendingTargetSwitched(targetKey)
 	end
 end
 
-local function UpdateTargetSnapshot(targetName, health, maxHealth, targetTargetName)
+local function UpdateTargetSnapshot(targetName, health, maxHealth, targetTargetName, targetUnitId)
 	if type(targetName) ~= "string" or health == nil then
 		return nil
 	end
@@ -3519,7 +4060,11 @@ local function UpdateTargetSnapshot(targetName, health, maxHealth, targetTargetN
 		return nil
 	end
 
-	local key = NormalizeTrimmedName(displayName)
+	targetUnitId = Analysis.NormalizeUnitId(targetUnitId)
+	local key = Analysis.BuildTargetKey(targetUnitId, displayName)
+	if key == nil then
+		return nil
+	end
 	local now = RefreshClock()
 	local snapshot = runtime.targetSnapshotsByName[key]
 	local expired = snapshot ~= nil and now - (tonumber(snapshot.lastSeenTime) or 0) > TARGET_CACHE_SECONDS
@@ -3531,6 +4076,8 @@ local function UpdateTargetSnapshot(targetName, health, maxHealth, targetTargetN
 	end
 
 	snapshot.key = key
+	snapshot.unitId = targetUnitId
+	snapshot.nameKey = NormalizeTrimmedName(displayName)
 	snapshot.displayName = displayName
 	snapshot.lastObservedHealth = health
 	snapshot.maxHealth = maxHealth
@@ -3559,14 +4106,15 @@ end
 
 local function UpdateCurrentTarget(suppressDirectCount)
 	local targetName = SafeUnitName("target")
+	local targetUnitId = Analysis.GetCurrentTargetUnitId()
 	local targetKey = nil
 	if targetName ~= nil then
-		targetKey = NormalizeTrimmedName(targetName)
+		targetKey = Analysis.BuildTargetKey(targetUnitId, targetName)
 	end
 	local targetTargetName = SafeUnitName("targettarget")
 	local health = SafeUnitValue("UnitHealth", "target")
 	local maxHealth = SafeUnitValue("UnitMaxHealth", "target")
-	local snapshot = UpdateTargetSnapshot(targetName, health, maxHealth, targetTargetName)
+	local snapshot = UpdateTargetSnapshot(targetName, health, maxHealth, targetTargetName, targetUnitId)
 	CapturePendingTargetHit(snapshot, "target_poll")
 
 	if targetKey ~= runtime.currentTargetKey then
@@ -3599,7 +4147,7 @@ local function UpdateCurrentTarget(suppressDirectCount)
 			return
 		end
 		runtime.currentTargetDeathCounted = true
-		CountSnapshotKill(snapshot, targetName, FindKillerForTarget(targetName))
+		CountSnapshotKill(snapshot, targetName, FindKillerForTarget(targetName, targetKey))
 	end
 end
 
@@ -3779,6 +4327,86 @@ local function TryCountLethalDamage(targetName, targetKey, sourceName, damageAmo
 	end
 end
 
+function Analysis.GetRecentDamageRecord(targetKey, targetName, now)
+	now = now or RefreshClock()
+	local damage = targetKey ~= nil and runtime.recentDamageByTarget[targetKey] or nil
+	if damage ~= nil and now - (tonumber(damage.time) or 0) <= DAMAGE_RECENT_SECONDS then
+		return damage
+	end
+	local nameKey = Analysis.BuildTargetKey(nil, targetName)
+	if nameKey ~= nil and nameKey ~= targetKey then
+		damage = runtime.recentDamageByTarget[nameKey]
+		if damage ~= nil and now - (tonumber(damage.time) or 0) <= DAMAGE_RECENT_SECONDS then
+			return damage
+		end
+	end
+	return nil
+end
+
+function Analysis.ShouldCountNpcDeathEvent(msg, targetKey, now)
+	if type(msg) ~= "table" or not IsValidName(msg.targetName) then
+		return false
+	end
+	if IsLocalPlayerName(msg.targetName) or Analysis.IsAlliedPlayerName(msg.targetName) then
+		return false
+	end
+	if IsLocalPlayerName(msg.sourceName) then
+		return true
+	end
+	local damage = Analysis.GetRecentDamageRecord(targetKey, msg.targetName, now)
+	return damage ~= nil and IsLocalPlayerName(damage.sourceName)
+end
+
+-- NPC death combat messages improve attribution only; EXP_CHANGED is the kill-count signal.
+function Analysis.CountNpcDeathFromCombatEvent(msg)
+	local now = RefreshClock()
+	local targetKey = Analysis.BuildTargetKey(msg and msg.unitId, msg and msg.targetName)
+	if targetKey == nil
+		or not Analysis.IsNpcExpTarget(msg and msg.unitId, msg and msg.targetName)
+		or not Analysis.ShouldCountNpcDeathEvent(msg, targetKey, now)
+	then
+		return false
+	end
+	MarkSnapshotCountedByKey(targetKey)
+	Analysis.TouchCombatLogActivity(msg.targetName, msg.sourceName, now)
+	return true
+end
+
+function Analysis.HandleCombatTextMessage(...)
+	local msg = Analysis.ParseCombatTextMessage(...)
+	if not Analysis.IsDamageCombatText(msg) then
+		return false
+	end
+	if not Analysis.IsLocalPlayerUnitId(msg.sourceUnitId) or Analysis.IsLocalPlayerUnitId(msg.targetUnitId) then
+		return false
+	end
+
+	local targetInfo = Analysis.GetUnitInfoById(msg.targetUnitId)
+	if type(targetInfo) == "table" and targetInfo.type == "character" then
+		return false
+	end
+	local targetName = Analysis.GetUnitNameById(msg.targetUnitId, targetInfo)
+	if not IsValidName(targetName) or IsLocalPlayerName(targetName) or Analysis.IsAlliedPlayerName(targetName) then
+		return false
+	end
+
+	local targetKey = Analysis.BuildTargetKey(msg.targetUnitId, targetName)
+	if targetKey == nil then
+		return false
+	end
+	local sourceName = GetLocalPlayerName() or "You"
+	runtime.recentDamageByTarget[targetKey] = {
+		sourceName = sourceName,
+		targetName = targetName,
+		eventType = "COMBAT_TEXT",
+		amount = tonumber(msg.amount) or 0,
+		time = RefreshClock(),
+	}
+	Analysis.TouchCombatLogActivity(targetName, sourceName)
+	Analysis.AddExpKillCandidate(targetName, targetKey, sourceName)
+	return true
+end
+
 local function HandleCombatMessage(...)
 	local now = RefreshClock()
 	local msg = Analysis.ParseCombatMessage(...)
@@ -3790,6 +4418,8 @@ local function HandleCombatMessage(...)
 	if IsCombatDeathEvent(eventType) then
 		if Analysis.IsAlliedPlayerName(targetName) then
 			Analysis.CountAlliedPlayerDeath(targetName, sourceName)
+		else
+			Analysis.CountNpcDeathFromCombatEvent(msg)
 		end
 		return
 	end
@@ -3818,14 +4448,25 @@ local function HandleCombatMessage(...)
 		Analysis.TryCountLocalPlayerDeath(sourceName)
 		return
 	end
-	local targetKey = NormalizeTrimmedName(targetName)
-	runtime.recentDamageByTarget[targetKey] = {
+	local targetKey = Analysis.BuildTargetKey(msg.unitId, targetName)
+	local damageRecord = {
 		sourceName = sourceName,
 		targetName = targetName,
 		eventType = eventType,
 		amount = damageAmount,
 		time = now,
 	}
+	if targetKey ~= nil then
+		runtime.recentDamageByTarget[targetKey] = damageRecord
+	end
+	local nameKey = Analysis.BuildTargetKey(nil, targetName)
+	if nameKey ~= nil and nameKey ~= targetKey then
+		runtime.recentDamageByTarget[nameKey] = damageRecord
+	end
+	if Analysis.IsNpcExpTarget(msg.unitId, targetName) and IsLocalPlayerName(sourceName) then
+		Analysis.TouchCombatLogActivity(targetName, sourceName, now)
+		Analysis.AddExpKillCandidate(targetName, targetKey, sourceName)
+	end
 	TryCountLethalDamage(targetName, targetKey, sourceName, damageAmount)
 end
 
@@ -3857,6 +4498,8 @@ local function ClearKillCounts()
 	runtime.recentDamageByTarget = {}
 	runtime.targetSnapshotsByName = {}
 	runtime.pendingTargetHitsByKey = {}
+	runtime.recentNpcDeathTimes = {}
+	runtime.expKillCandidates = {}
 	runtime.currentTargetKey = nil
 	runtime.currentTargetDeathCounted = false
 	Analysis.ClearSessionStats()
@@ -4642,9 +5285,6 @@ function Analysis.BuildSortedReportUnitNames()
 	for name in pairs(runtime.damageTakenByUnit) do
 		Analysis.AddReportName(names, seen, name)
 	end
-	for name in pairs(runtime.itemDropsByUnit) do
-		Analysis.AddReportName(names, seen, name)
-	end
 	for name in pairs(runtime.expByUnit) do
 		Analysis.AddReportName(names, seen, name)
 	end
@@ -4675,7 +5315,11 @@ function Analysis.BuildSortedDropNames(drops)
 		return names
 	end
 	for itemName, count in pairs(drops) do
-		if IsValidName(itemName) and tonumber(count) ~= nil and tonumber(count) > 0 then
+		if IsValidName(itemName)
+			and not Analysis.IsCurrencyLootItemName(itemName)
+			and tonumber(count) ~= nil
+			and tonumber(count) > 0
+		then
 			names[#names + 1] = itemName
 		end
 	end
@@ -4688,6 +5332,11 @@ function Analysis.BuildSortedDropNames(drops)
 		return string.lower(left) < string.lower(right)
 	end)
 	return names
+end
+
+function Analysis.BuildSortedSessionLootNames()
+	Analysis.EnsureSessionLootItems()
+	return Analysis.BuildSortedDropNames(runtime.sessionLootItems)
 end
 
 function Analysis.BuildDropSummary(mobName, maxItems)
@@ -4965,6 +5614,58 @@ function Analysis.BuildCompactBreakdown(amountsByKey, total, maxItems)
 	return table.concat(parts, ", ")
 end
 
+function Analysis.GetLootSectionReserve(lootNames)
+	local count = 0
+	if type(lootNames) == "table" then
+		count = #lootNames
+	end
+	if count <= 0 then
+		return 3
+	end
+	count = count + 2
+	if count > 12 then
+		count = 12
+	end
+	return count
+end
+
+function Analysis.AppendSessionLootLines(lines, lootNames)
+	lootNames = lootNames or Analysis.BuildSortedSessionLootNames()
+	if #lines < VIEW_CONTENT_ROW_COUNT then
+		Analysis.AddViewLine(lines, "spacer", "")
+	end
+	if not Analysis.AddViewLine(lines, "header", "Loot") then
+		return false
+	end
+	if #lootNames == 0 then
+		return Analysis.AddViewLine(lines, "drop", "  No loot recorded yet.")
+	end
+
+	local remainingRows = VIEW_CONTENT_ROW_COUNT - #lines
+	local visibleItems = #lootNames
+	if visibleItems > remainingRows then
+		visibleItems = remainingRows - 1
+	end
+	if visibleItems < 0 then
+		visibleItems = 0
+	end
+	for lootIndex = 1, visibleItems do
+		local itemName = lootNames[lootIndex]
+		local count = runtime.sessionLootItems[itemName]
+		if not Analysis.AddViewLine(
+			lines,
+			"drop",
+			Analysis.TruncateText("  " .. itemName .. " x" .. Analysis.FormatAmount(count), 100)
+		) then
+			return false
+		end
+	end
+	if visibleItems < #lootNames then
+		return Analysis.AddViewLine(lines, "drop", "  +" .. tostring(#lootNames - visibleItems) .. " more loot items")
+	end
+	return true
+end
+
 function Analysis.AppendCombatReviewLines(lines)
 	local stats = Analysis.EnsurePlayerCombatStats()
 	local totalDamage = Analysis.GetPlayerDamageTotal()
@@ -5169,9 +5870,15 @@ function Analysis.ApplyViewLineStyle(label, kind)
 end
 
 function Analysis.AddViewLine(lines, kind, text, segments)
-	if #lines >= VIEW_CONTENT_ROW_COUNT then
+	local maxRows = tonumber(lines.maxRows) or VIEW_CONTENT_ROW_COUNT
+	if maxRows > VIEW_CONTENT_ROW_COUNT then
+		maxRows = VIEW_CONTENT_ROW_COUNT
+	elseif maxRows < 1 then
+		maxRows = 1
+	end
+	if #lines >= maxRows then
 		if lines.overflowShown ~= true then
-			lines[VIEW_CONTENT_ROW_COUNT] = { kind = "warning", text = "  ... additional session data not shown" }
+			lines[maxRows] = { kind = "warning", text = "  ... additional session data not shown" }
 			lines.overflowShown = true
 		end
 		return false
@@ -5184,6 +5891,7 @@ function Analysis.BuildViewDisplayLines()
 	local lines = {}
 	local now = RefreshClock()
 	local unitNames = Analysis.BuildSortedReportUnitNames()
+	local lootNames = Analysis.BuildSortedSessionLootNames()
 	local sessionKills = Analysis.GetSessionKillTotal()
 	local totalDamageDealt = tonumber(runtime.totalDamageDealt) or 0
 	local totalDamageTaken = tonumber(runtime.totalDamageTaken) or 0
@@ -5252,34 +5960,11 @@ function Analysis.BuildViewDisplayLines()
 	)
 	Analysis.AddViewLine(lines, "damage", "  Damage " .. Analysis.FormatCompactAmount(totalDamageDealt))
 	Analysis.AddViewLine(lines, "damage_taken", "  Damage Taken " .. Analysis.FormatCompactAmount(totalDamageTaken))
-	Analysis.AddViewLine(lines, "items", "  Items " .. Analysis.FormatAmount(totalDroppedItems))
+	Analysis.AddViewLine(lines, "items", "  Items: " .. Analysis.FormatAmount(totalDroppedItems))
+	lines.maxRows = VIEW_CONTENT_ROW_COUNT - Analysis.GetLootSectionReserve(lootNames)
 	Analysis.AppendCombatReviewLines(lines)
-	Analysis.AddViewLine(lines, "spacer", "")
-	Analysis.AddViewLine(lines, "header", "Units")
-
-	for _, mobName in ipairs(unitNames) do
-		local unitLineKind = Analysis.IsPlayerDeathCounterName(mobName) and "player_death" or "unit"
-		local unitLine = "  "
-			.. mobName
-			.. ": kills "
-			.. Analysis.FormatAmount(runtime.sessionKillCounts[mobName])
-			.. " | dealt "
-			.. Analysis.FormatCompactAmount(runtime.damageDealtByUnit[mobName])
-			.. " | taken "
-			.. Analysis.FormatCompactAmount(runtime.damageTakenByUnit[mobName])
-			.. " | exp "
-			.. Analysis.FormatCompactAmount(runtime.expByUnit[mobName])
-		if not Analysis.AddViewLine(lines, unitLineKind, Analysis.TruncateText(unitLine, 100)) then
-			return lines
-		end
-
-		local dropSummary = Analysis.BuildDropSummary(mobName, 4)
-		if dropSummary ~= "" then
-			if not Analysis.AddViewLine(lines, "drop", Analysis.TruncateText("    drops: " .. dropSummary, 100)) then
-				return lines
-			end
-		end
-	end
+	lines.maxRows = VIEW_CONTENT_ROW_COUNT
+	Analysis.AppendSessionLootLines(lines, lootNames)
 	return lines
 end
 
@@ -5325,6 +6010,8 @@ local function BuildCurrentSessionSummary()
 		.. " ("
 		.. Analysis.FormatPerMinute(Analysis.GetExpPerMinute(now))
 		.. ")"
+		.. " | Items: "
+		.. Analysis.FormatAmount(runtime.totalDroppedItems)
 		.. " | AEK "
 		.. Analysis.FormatCompactAmount(averageExpPerKill)
 		.. " | "
@@ -6214,6 +6901,10 @@ function eventWindow:OnEvent(event, ...)
 		HandleCombatMessage(...)
 		return
 	end
+	if event == "COMBAT_TEXT" then
+		Analysis.HandleCombatTextMessage(...)
+		return
+	end
 	if event == "ITEM_ACQUISITION_BY_LOOT" then
 		CaptureSessionActivityLocation()
 		Analysis.HandleLootAcquisitionEvent(...)
@@ -6259,6 +6950,7 @@ end
 eventWindow:SetHandler("OnEvent", eventWindow.OnEvent)
 
 eventWindow:RegisterEvent("COMBAT_MSG")
+eventWindow:RegisterEvent("COMBAT_TEXT")
 eventWindow:RegisterEvent("ITEM_ACQUISITION_BY_LOOT")
 eventWindow:RegisterEvent("MONEY_ACQUISITION_BY_LOOT")
 eventWindow:RegisterEvent("LOOT_BAG_CHANGED")
