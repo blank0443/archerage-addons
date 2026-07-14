@@ -1,52 +1,53 @@
-# dpsbasics
+# Unit Tracker
 
-Combat and targeting helpers for open-world PvP and party play. Includes target role display, Unit Tracker (friendly/hostile lists), Role Dancer alerts, and a Songcraft passive timer.
+Friendly and hostile player lists for open-world PvP. Part of the `dpsbasics` addon (`unit_tracker.lua`).
 
 ## Requirements
 
-Requires the shared [`globals`](https://github.com/Schiz-n/ArcheRage-addons/tree/master/globals) folder next to this addon.
+Requires the shared [`globals`](https://github.com/Schiz-n/ArcheRage-addons/tree/master/globals) folder next to `dpsbasics`.
 
-## Modules
+## Features
 
-| File | Purpose |
-|------|---------|
-| `dpsbasics.lua` | Target class/role icons and shield indicators |
-| `unit_tracker.lua` | Friendly/hostile player lists, notes, markers, hotkeys |
-| `roledancer.lua` | Role / spell-dance related UI helpers |
-| `passive_tracker.lua` | Sustained Rhythm (Songcraft) timer alert |
+- Separate **Friendly** and **Hostile** lists, saved between sessions
+- Tracks by player name and unitId so renamed players can still be matched
+- Per-player notes with a sticky-note editor and a two-line preview on the main window
+- Auto-applies hostile markers when a listed hostile is targeted
+- Auto-opens when you take verified damage from another player (not NPCs)
+- **Opts** panel: view lists, export to file, bind Friendly/Hostile hotkeys
+- Draggable windows with saved positions
 
-## Unit Tracker
+## Usage
 
-Track players you care about in the open world: mark them friendly or hostile, keep per-player notes, and bind hotkeys so adding someone is one keypress.
+1. Click the **Unit Tracker** launch button (or let incoming player damage open it).
+2. Target a player → **Friendly** or **Hostile** to add them.
+3. Click the note preview to edit that player’s note → **Save**.
+4. Open **Opts** for list management, export, and hotkey binding.
 
-### Features
+A player can only be on one list. Adding them to the other list moves them. Friendlies show in dark green; hostiles in red.
 
-- Separate **Friendly** and **Hostile** lists (persisted between sessions).
-- Name + unitId tracking so renamed players can still be recognized.
-- Per-player notes with a sticky-note editor and preview on the main window.
-- Hostile target markers applied automatically when a listed hostile is selected.
-- Auto-opens when you take verified damage from another player (not NPCs).
-- **Opts**: view full lists, export to a text file, and bind Friendly/Hostile hotkeys.
-- Draggable windows; positions are saved.
+## Opts
 
-### Usage
+| Button | Action |
+|--------|--------|
+| **View List** | Browse Friendly/Hostile entries; remove with confirm |
+| **Export** | Write lists and notes to a dated `.txt` file |
+| **Friendly** | Click, then press a key to bind “add target as friendly” |
+| **Hostile** | Click, then press a key to bind “add target as hostile” |
 
-1. Click the **Unit Tracker** launch button (or open it when incoming player damage auto-opens the window).
-2. Target a player, then click **Friendly** or **Hostile** (or use your bound hotkeys).
-3. Click the note preview to open the player note window; **Save** stores the note.
-4. Open **Opts** for:
-   - **View List** — browse / remove players from either list
-   - **Export** — write lists + notes to a dated text file
-   - **Friendly** / **Hostile** — click a button, then press a key (optional Ctrl/Shift/Alt) to bind that hotkey; **Esc** cancels
+While binding: press the desired key (optional Ctrl/Shift/Alt), or **Esc** to cancel. Buttons show the current binding, e.g. `Friendly [F5]`. Reusing a key on the other list clears the previous binding. Hotkeys work with the tracker window closed.
 
-Listed friendlies show in dark green; hostiles show in red. The same player can only be on one list at a time — adding them to the other list moves them.
+## Notes
 
-### Hotkeys
+- Notes are keyed to the tracked player and persist with the lists.
+- The main window preview shows up to two lines; click it to open the full editor.
+- The note window title is the player name; the date appears under the input.
 
-Hotkeys use the game’s binding API (same approach as combatcloset):
+## Persistence
 
-1. Opts → click **Friendly** or **Hostile**
-2. Press the key you want (e.g. `F5` or `Ctrl-F`)
-3. Binding is saved and works even when the Unit Tracker window is closed
+| Data | Storage key |
+|------|-------------|
+| Friendly / Hostile lists + notes | `dpsBasicsUnitTrackerLists` |
+| Hotkey bindings | `dpsBasicsUnitTrackerHotkeys` |
+| Window positions | `dpsBasicsUnitTracker*Position` keys |
 
-Reusing a key on the other list clears the previous binding.
+Export files use the prefix `dpsbasics_unit_tracker_export_` plus the current date.
