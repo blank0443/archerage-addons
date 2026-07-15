@@ -1,10 +1,6 @@
 # Unit Tracker
 
-Friendly and hostile player lists for open-world PvP. Part of the `dpsbasics` addon (`unit_tracker.lua`).
-
-## Requirements
-
-Requires the shared [`globals`](https://github.com/Schiz-n/ArcheRage-addons/tree/master/globals) folder next to `dpsbasics`.
+Addon for tracking if players are friendly or hostile by adding to list.
 
 ## Features
 
