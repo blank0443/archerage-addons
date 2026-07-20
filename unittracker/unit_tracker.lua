@@ -152,6 +152,10 @@ local runtime = {
 		friendly = "",
 		hostile = "",
 	},
+	hotkeysActive = {
+		friendly = nil,
+		hostile = nil,
+	},
 	hotkeyCapture = nil,
 	hotkeyCaptureInput = nil,
 	friendlyPage = 1,
@@ -1211,6 +1215,12 @@ function hotkeys.NormalizeKeyName(key)
 	if key == "LALT" or key == "RALT" or key == "MENU" then
 		return "ALT"
 	end
+	-- Grave/tilde (`~) — OnKeyDown often reports "`"; X2 expects OEM_3.
+	if key == "`" or key == "~" or key == "GRAVE" or key == "GRAVEACCENT"
+		or key == "BACKTICK" or key == "BACKQUOTE" or key == "OEM3" or key == "OEM_3"
+	then
+		return "OEM_3"
+	end
 	if string.match(key, "^NUMPAD(%d)$") then
 		return "NUMBER" .. string.match(key, "^NUMPAD(%d)$")
 	end
@@ -1264,13 +1274,130 @@ function hotkeys.BuildCapturedString(key)
 	return key
 end
 
-function hotkeys.RegisterList(listName)
+-- Display-friendly label for saved API binding strings.
+function hotkeys.DisplayBinding(binding)
+	binding = Trim(tostring(binding or ""))
+	if binding == "" then
+		return ""
+	end
+	binding = string.gsub(binding, "OEM_3", "`")
+	return binding
+end
+
+-- Match combatcloset: SetBindingUiEvent is the primary path.
+-- If the engine does not confirm the bind, fall back to BindingToOption → set → SaveHotKey → OptionToBinding.
+function hotkeys.ApplyEngineBinding(actionName, binding)
+	if actionName == nil or X2Hotkey == nil or type(X2Hotkey.SetBindingUiEvent) ~= "function" then
+		return false, "X2Hotkey unavailable"
+	end
+	binding = Trim(tostring(binding or ""))
+
+	local ok, err = pcall(function()
+		X2Hotkey:SetBindingUiEvent(actionName, binding)
+	end)
+	if not ok then
+		return false, err
+	end
+
+	-- Clearing: no need for option-stage fallback.
+	if binding == "" then
+		return true, nil
+	end
+
+	local confirmed = Trim(tostring(hotkeys.ReadEngineBinding(actionName) or ""))
+	if confirmed ~= "" then
+		return true, nil
+	end
+
+	-- Fallback path (options UI transaction) when direct UI-event bind did not stick.
+	if type(X2Hotkey.BindingToOption) == "function" then
+		pcall(function()
+			X2Hotkey:BindingToOption()
+		end)
+	end
+	pcall(function()
+		X2Hotkey:SetBindingUiEvent(actionName, binding)
+	end)
+	if type(X2Hotkey.SetOptionBindingUiEvent) == "function" then
+		pcall(function()
+			X2Hotkey:SetOptionBindingUiEvent(actionName, binding)
+		end)
+	end
+	if type(X2Hotkey.SaveHotKey) == "function" then
+		pcall(function()
+			X2Hotkey:SaveHotKey()
+		end)
+	end
+	if type(X2Hotkey.OptionToBinding) == "function" then
+		pcall(function()
+			X2Hotkey:OptionToBinding()
+		end)
+	end
+
+	return true, nil
+end
+
+function hotkeys.ReadEngineBinding(actionName)
+	if actionName == nil or X2Hotkey == nil or type(X2Hotkey.GetBindingUiEvent) ~= "function" then
+		return nil
+	end
+	local ok, value = pcall(function()
+		return X2Hotkey:GetBindingUiEvent(actionName, 0)
+	end)
+	if ok then
+		return value
+	end
+	ok, value = pcall(function()
+		return X2Hotkey:GetBindingUiEvent(actionName, 1)
+	end)
+	if ok then
+		return value
+	end
+	return nil
+end
+
+function hotkeys.UnregisterList(listName)
 	local actionName = hotkeys.GetActionName(listName)
-	if actionName == nil or X2Hotkey == nil then
+	if actionName == nil then
 		return
 	end
+
+	-- Mark inactive first so any HOTKEY_ACTION that still fires is ignored
+	-- (same idea as combatcloset clearing set.HotkeyAction).
+	if runtime.hotkeysActive == nil then
+		runtime.hotkeysActive = {}
+	end
+	runtime.hotkeysActive[listName] = nil
+
+	hotkeys.ApplyEngineBinding(actionName, "")
+end
+
+function hotkeys.RegisterList(listName)
+	local actionName = hotkeys.GetActionName(listName)
+	if actionName == nil then
+		return false
+	end
 	local binding = Trim(tostring(runtime.hotkeys[listName] or ""))
-	SafeCall(X2Hotkey, "SetBindingUiEvent", actionName, binding)
+	if binding == "" then
+		hotkeys.UnregisterList(listName)
+		return false
+	end
+	if runtime.hotkeysActive == nil then
+		runtime.hotkeysActive = {}
+	end
+	runtime.hotkeysActive[listName] = actionName
+
+	local ok, err = hotkeys.ApplyEngineBinding(actionName, binding)
+	if not ok then
+		-- Keep active so a later ENTERED_WORLD re-register can recover; report failure.
+		if DispatchExportStatus ~= nil then
+			DispatchExportStatus(
+				"[Unit Tracker] Failed to bind " .. listName .. " (" .. tostring(err) .. ")."
+			)
+		end
+		return false
+	end
+	return true
 end
 
 function hotkeys.RegisterAll()
@@ -1288,12 +1415,23 @@ end
 function hotkeys.Load()
 	runtime.hotkeys.friendly = ""
 	runtime.hotkeys.hostile = ""
+	runtime.hotkeysActive = {
+		friendly = nil,
+		hostile = nil,
+	}
 	local data = LoadData(HOTKEY_SAVE_KEY)
 	if type(data) ~= "table" then
 		return
 	end
-	runtime.hotkeys.friendly = Trim(tostring(data.friendly or ""))
-	runtime.hotkeys.hostile = Trim(tostring(data.hostile or ""))
+	-- Migrate older saves that stored literal "`" instead of OEM_3.
+	local function MigrateBinding(value)
+		value = Trim(tostring(value or ""))
+		value = string.gsub(value, "`", "OEM_3")
+		value = string.gsub(value, "~", "OEM_3")
+		return value
+	end
+	runtime.hotkeys.friendly = MigrateBinding(data.friendly)
+	runtime.hotkeys.hostile = MigrateBinding(data.hostile)
 end
 
 function hotkeys.ButtonLabel(listName)
@@ -1303,7 +1441,7 @@ function hotkeys.ButtonLabel(listName)
 	end
 	local binding = Trim(tostring(runtime.hotkeys[listName] or ""))
 	if binding ~= "" then
-		return title .. " [" .. binding .. "]"
+		return title .. " [" .. hotkeys.DisplayBinding(binding) .. "]"
 	end
 	return title
 end
@@ -1357,15 +1495,30 @@ function hotkeys.Assign(listName, binding)
 	if binding ~= "" then
 		if listName == "friendly" and runtime.hotkeys.hostile == binding then
 			runtime.hotkeys.hostile = ""
-			hotkeys.RegisterList("hostile")
+			hotkeys.UnregisterList("hostile")
 		elseif listName == "hostile" and runtime.hotkeys.friendly == binding then
 			runtime.hotkeys.friendly = ""
-			hotkeys.RegisterList("friendly")
+			hotkeys.UnregisterList("friendly")
 		end
 	end
 
 	runtime.hotkeys[listName] = binding
-	hotkeys.RegisterList(listName)
+	if binding == "" then
+		hotkeys.UnregisterList(listName)
+	else
+		local registered = hotkeys.RegisterList(listName)
+		-- If OEM_3 form failed to stick, retry with literal grave character.
+		if registered and string.find(binding, "OEM_3", 1, true) ~= nil then
+			local actionName = hotkeys.GetActionName(listName)
+			local engineValue = Trim(tostring(hotkeys.ReadEngineBinding(actionName) or ""))
+			if engineValue == "" then
+				local alt = string.gsub(binding, "OEM_3", "`")
+				runtime.hotkeys[listName] = alt
+				hotkeys.RegisterList(listName)
+				binding = alt
+			end
+		end
+	end
 	hotkeys.Save()
 	hotkeys.RefreshButtons()
 
@@ -1373,7 +1526,20 @@ function hotkeys.Assign(listName, binding)
 	if binding == "" then
 		DispatchExportStatus("[Unit Tracker] " .. title .. " hotkey cleared.")
 	else
-		DispatchExportStatus("[Unit Tracker] " .. title .. " hotkey set to " .. binding .. ".")
+		local actionName = hotkeys.GetActionName(listName)
+		local engineValue = Trim(tostring(hotkeys.ReadEngineBinding(actionName) or ""))
+		local display = hotkeys.DisplayBinding(binding)
+		if engineValue ~= "" then
+			DispatchExportStatus(
+				"[Unit Tracker] " .. title .. " hotkey set to " .. display
+					.. " (engine: " .. hotkeys.DisplayBinding(engineValue) .. ")."
+			)
+		else
+			DispatchExportStatus(
+				"[Unit Tracker] " .. title .. " hotkey saved as " .. display
+					.. " but engine did not confirm the bind. Try F5/F6 instead of Ctrl-`."
+			)
+		end
 	end
 end
 
@@ -1416,16 +1582,42 @@ function hotkeys.HandleCaptureKey(key)
 	return true
 end
 
-function hotkeys.OnAction(actionName, isReleased)
+function hotkeys.OnAction(...)
+	local arg1, arg2, arg3 = ...
+	local actionName = nil
+	local isReleased = nil
+	-- Engine may pass (actionName, isReleased) or (self, actionName, isReleased).
+	if type(arg1) == "string" then
+		actionName = arg1
+		isReleased = arg2
+	elseif type(arg2) == "string" then
+		actionName = arg2
+		isReleased = arg3
+	else
+		return
+	end
+
 	if isReleased == true then
 		return
 	end
 	if runtime.hotkeyCapture ~= nil then
 		return
 	end
-	if actionName == hotkeys.ACTION_FRIENDLY then
+
+	-- Ignore engine events unless this action is still active (cleared via X).
+	local active = runtime.hotkeysActive
+	if type(active) ~= "table" then
+		return
+	end
+	if actionName == hotkeys.ACTION_FRIENDLY
+		and active.friendly == hotkeys.ACTION_FRIENDLY
+		and Trim(tostring(runtime.hotkeys.friendly or "")) ~= ""
+	then
 		AddCurrentTargetToList("friendly")
-	elseif actionName == hotkeys.ACTION_HOSTILE then
+	elseif actionName == hotkeys.ACTION_HOSTILE
+		and active.hostile == hotkeys.ACTION_HOSTILE
+		and Trim(tostring(runtime.hotkeys.hostile or "")) ~= ""
+	then
 		AddCurrentTargetToList("hostile")
 	end
 end
@@ -3103,6 +3295,8 @@ local function CreateOptsWindow()
 	optsWindow.exportButton:SetExtent(fullButtonWidth, BUTTON_HEIGHT)
 	buttonY = buttonY + BUTTON_HEIGHT + BUTTON_GAP
 
+	local hotkeyButtonWidth = fullButtonWidth - VIEW_REMOVE_BUTTON_WIDTH - VIEW_CONFIRM_GAP
+
 	optsWindow.friendlyHotkeyButton = CreateButton(
 		optsWindow,
 		"dpsBasicsUnitTrackerOptsFriendlyHotkeyButton",
@@ -3110,8 +3304,19 @@ local function CreateOptsWindow()
 		PADDING,
 		buttonY
 	)
-	optsWindow.friendlyHotkeyButton:SetExtent(fullButtonWidth, BUTTON_HEIGHT)
+	optsWindow.friendlyHotkeyButton:SetExtent(hotkeyButtonWidth, BUTTON_HEIGHT)
 	SetButtonTextColor(optsWindow.friendlyHotkeyButton, LIST_COLORS.friendly)
+
+	optsWindow.friendlyHotkeyClearButton = optsWindow:CreateChildWidget(
+		"button",
+		"dpsBasicsUnitTrackerOptsFriendlyHotkeyClearButton",
+		0,
+		true
+	)
+	optsWindow.friendlyHotkeyClearButton:SetStyle("text_default")
+	optsWindow.friendlyHotkeyClearButton:SetText("X")
+	optsWindow.friendlyHotkeyClearButton:SetExtent(VIEW_REMOVE_BUTTON_WIDTH, BUTTON_HEIGHT)
+	optsWindow.friendlyHotkeyClearButton:AddAnchor("TOPRIGHT", optsWindow, -PADDING, buttonY)
 	buttonY = buttonY + BUTTON_HEIGHT + BUTTON_GAP
 
 	optsWindow.hostileHotkeyButton = CreateButton(
@@ -3121,8 +3326,19 @@ local function CreateOptsWindow()
 		PADDING,
 		buttonY
 	)
-	optsWindow.hostileHotkeyButton:SetExtent(fullButtonWidth, BUTTON_HEIGHT)
+	optsWindow.hostileHotkeyButton:SetExtent(hotkeyButtonWidth, BUTTON_HEIGHT)
 	SetButtonTextColor(optsWindow.hostileHotkeyButton, LIST_COLORS.hostile)
+
+	optsWindow.hostileHotkeyClearButton = optsWindow:CreateChildWidget(
+		"button",
+		"dpsBasicsUnitTrackerOptsHostileHotkeyClearButton",
+		0,
+		true
+	)
+	optsWindow.hostileHotkeyClearButton:SetStyle("text_default")
+	optsWindow.hostileHotkeyClearButton:SetText("X")
+	optsWindow.hostileHotkeyClearButton:SetExtent(VIEW_REMOVE_BUTTON_WIDTH, BUTTON_HEIGHT)
+	optsWindow.hostileHotkeyClearButton:AddAnchor("TOPRIGHT", optsWindow, -PADDING, buttonY)
 
 	-- Focus target for capturing the next key press while assigning bindings.
 	local captureInput = optsWindow:CreateChildWidgetByType(
@@ -3201,10 +3417,22 @@ local function CreateOptsWindow()
 	end
 	optsWindow.friendlyHotkeyButton:SetHandler("OnClick", optsWindow.friendlyHotkeyButton.OnClick)
 
+	function optsWindow.friendlyHotkeyClearButton:OnClick()
+		hotkeys.CancelCapture()
+		hotkeys.Assign("friendly", "")
+	end
+	optsWindow.friendlyHotkeyClearButton:SetHandler("OnClick", optsWindow.friendlyHotkeyClearButton.OnClick)
+
 	function optsWindow.hostileHotkeyButton:OnClick()
 		hotkeys.BeginCapture("hostile")
 	end
 	optsWindow.hostileHotkeyButton:SetHandler("OnClick", optsWindow.hostileHotkeyButton.OnClick)
+
+	function optsWindow.hostileHotkeyClearButton:OnClick()
+		hotkeys.CancelCapture()
+		hotkeys.Assign("hostile", "")
+	end
+	optsWindow.hostileHotkeyClearButton:SetHandler("OnClick", optsWindow.hostileHotkeyClearButton.OnClick)
 
 	hotkeys.RefreshButtons()
 	return optsWindow
@@ -3455,6 +3683,18 @@ local function CreateTrackerWindow()
 		RefreshTargetState()
 	end
 	window:SetHandler("OnUpdate", window.OnUpdate)
+
+	-- Also listen here (combatcloset registers HOTKEY_ACTION on its main visible window).
+	function window:OnEvent(event, ...)
+		if not runtime.active then
+			return
+		end
+		if event == "HOTKEY_ACTION" then
+			hotkeys.OnAction(...)
+		end
+	end
+	window:SetHandler("OnEvent", window.OnEvent)
+	window:RegisterEvent("HOTKEY_ACTION")
 end
 
 LoadLists()
@@ -3476,7 +3716,10 @@ end
 
 local eventWindow = CreateEmptyWindow("dpsBasicsUnitTrackerEventWindow", "UIParent")
 runtime.eventWindow = eventWindow
-eventWindow:Show(false)
+-- Keep shown so HOTKEY_ACTION is delivered reliably (hidden windows can miss it).
+eventWindow:SetExtent(1, 1)
+eventWindow:AddAnchor("TOPLEFT", "UIParent", -100, -100)
+eventWindow:Show(true)
 
 function eventWindow:OnEvent(event, ...)
 	if not runtime.active then
