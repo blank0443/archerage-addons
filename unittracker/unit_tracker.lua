@@ -16,6 +16,9 @@ ADDON:ImportObject(OBJECT_TYPE.X2_EDITBOX)
 if OBJECT_TYPE.EDITBOX_MULTILINE ~= nil then
 	ADDON:ImportObject(OBJECT_TYPE.EDITBOX_MULTILINE)
 end
+if OBJECT_TYPE.WORLD_MAP ~= nil then
+	ADDON:ImportObject(OBJECT_TYPE.WORLD_MAP)
+end
 
 ADDON:ImportAPI(API_TYPE.UNIT.id)
 if API_TYPE.TEAM ~= nil then
@@ -29,6 +32,9 @@ if API_TYPE.INPUT ~= nil then
 end
 if API_TYPE.CHAT ~= nil then
 	ADDON:ImportAPI(API_TYPE.CHAT.id)
+end
+if API_TYPE.MAP ~= nil then
+	ADDON:ImportAPI(API_TYPE.MAP.id)
 end
 
 local SAVE_KEY = "dpsBasicsUnitTrackerLists"
@@ -193,6 +199,11 @@ local runtime = {
 	lastRefreshListName = nil,
 	lastRefreshNote = "",
 	markerScanCache = { key = nil, unitId = nil, index = nil, shouldWrite = false, at = 0 },
+	mapOverlay = {
+		pending = nil,
+		elapsed = 0,
+		attempts = 0,
+	},
 }
 _G.__DPS_BASICS_UNIT_TRACKER_RUNTIME = runtime
 
@@ -915,6 +926,277 @@ local function GetEntryAddedAt(entry)
 	return addedAt
 end
 
+-- Location capture / map open helpers live on runtime.map (avoids a new top-level local).
+-- Pattern mirrors loottracker/kill_count.lua: GetUnitWorldPositionByTarget + ShowWorldmapLocation + ShowSkillMapEffect.
+runtime.map = {
+	BUTTON_SIZE = 24,
+	MARKER_RADIUS = 24,
+	RETRY_SECONDS = 0.25,
+	RETRY_LIMIT = 12,
+}
+
+function runtime.map.SafeCallValues(target, methodName, ...)
+	if target == nil or type(target[methodName]) ~= "function" then
+		return false
+	end
+	return pcall(target[methodName], target, ...)
+end
+
+function runtime.map.RoundCoordinate(value)
+	value = tonumber(value)
+	if value == nil then
+		return nil
+	end
+	return math.floor((value * 100) + 0.5) / 100
+end
+
+function runtime.map.ReadCoordinateFromTable(point)
+	if type(point) ~= "table" then
+		return nil, nil, nil
+	end
+	local x = point.x or point.worldX or point.coordX or point[1]
+	local y = point.y or point.worldY or point.coordY or point[2]
+	local z = point.z or point.worldZ or point.coordZ or point[3]
+	return tonumber(x), tonumber(y), tonumber(z)
+end
+
+function runtime.map.ReadPositionValues(ok, coordinateSource, x, y, z)
+	if not ok then
+		return nil
+	end
+	if type(x) == "table" then
+		x, y, z = runtime.map.ReadCoordinateFromTable(x)
+	end
+	x = tonumber(x)
+	y = tonumber(y)
+	z = tonumber(z) or 0
+	if x == nil or y == nil then
+		return nil
+	end
+	return {
+		x = runtime.map.RoundCoordinate(x),
+		y = runtime.map.RoundCoordinate(y),
+		z = runtime.map.RoundCoordinate(z) or 0,
+		coordinateSource = coordinateSource,
+	}
+end
+
+function runtime.map.Normalize(point)
+	local x, y, z = runtime.map.ReadCoordinateFromTable(point)
+	if x == nil or y == nil then
+		return nil
+	end
+	local coordinateSource = tostring(point.coordinateSource or "player")
+	local normalized = {
+		x = runtime.map.RoundCoordinate(x),
+		y = runtime.map.RoundCoordinate(y),
+		z = runtime.map.RoundCoordinate(z) or 0,
+		zoneGroup = tonumber(point.zoneGroup),
+		coordinateSource = coordinateSource,
+	}
+
+	local worldX = tonumber(point.worldX)
+	local worldY = tonumber(point.worldY)
+	local worldZ = tonumber(point.worldZ)
+	if (worldX == nil or worldY == nil) and coordinateSource == "world" then
+		worldX, worldY, worldZ = x, y, z
+	end
+	if worldX ~= nil and worldY ~= nil then
+		normalized.worldX = runtime.map.RoundCoordinate(worldX)
+		normalized.worldY = runtime.map.RoundCoordinate(worldY)
+		normalized.worldZ = runtime.map.RoundCoordinate(worldZ) or 0
+	end
+
+	local localX = tonumber(point.localX)
+	local localY = tonumber(point.localY)
+	local localZ = tonumber(point.localZ)
+	if (localX == nil or localY == nil) and coordinateSource == "local" then
+		localX, localY, localZ = x, y, z
+	end
+	if localX ~= nil and localY ~= nil then
+		normalized.localX = runtime.map.RoundCoordinate(localX)
+		normalized.localY = runtime.map.RoundCoordinate(localY)
+		normalized.localZ = runtime.map.RoundCoordinate(localZ) or 0
+	end
+
+	return normalized
+end
+
+function runtime.map.GetEntryLocation(entry)
+	if type(entry) ~= "table" or type(entry.location) ~= "table" then
+		return nil
+	end
+	return runtime.map.Normalize(entry.location)
+end
+
+function runtime.map.CaptureLocalPlayer()
+	local ok, x, y, z = runtime.map.SafeCallValues(X2Unit, "GetUnitWorldPositionByTarget", "player", false)
+	local worldPoint = runtime.map.ReadPositionValues(ok, "world", x, y, z)
+
+	ok, x, y, z = runtime.map.SafeCallValues(X2Unit, "GetUnitWorldPositionByTarget", "player", true)
+	local localPoint = runtime.map.ReadPositionValues(ok, "local", x, y, z)
+
+	local point = nil
+	if worldPoint ~= nil then
+		worldPoint.worldX = worldPoint.x
+		worldPoint.worldY = worldPoint.y
+		worldPoint.worldZ = worldPoint.z
+		if localPoint ~= nil then
+			worldPoint.localX = localPoint.x
+			worldPoint.localY = localPoint.y
+			worldPoint.localZ = localPoint.z
+		end
+		point = worldPoint
+	elseif localPoint ~= nil then
+		localPoint.localX = localPoint.x
+		localPoint.localY = localPoint.y
+		localPoint.localZ = localPoint.z
+		point = localPoint
+	end
+
+	if point == nil then
+		return nil
+	end
+
+	local zoneGroup
+	ok, zoneGroup = runtime.map.SafeCallValues(X2Unit, "GetCurrentZoneGroup")
+	if ok then
+		point.zoneGroup = tonumber(zoneGroup)
+	end
+	return runtime.map.Normalize(point)
+end
+
+function runtime.map.GetMapCoordinates(point)
+	point = runtime.map.Normalize(point)
+	if point == nil then
+		return nil, nil, nil
+	end
+	local x = tonumber(point.worldX)
+	local y = tonumber(point.worldY)
+	local z = tonumber(point.worldZ)
+	if (x == nil or y == nil) and tostring(point.coordinateSource or "") ~= "local" then
+		x = tonumber(point.x)
+		y = tonumber(point.y)
+		z = tonumber(point.z)
+	end
+	if x == nil or y == nil then
+		return nil, nil, nil
+	end
+	return x, y, tonumber(z) or 0
+end
+
+function runtime.map.HasCoordinates(point)
+	local x, y = runtime.map.GetMapCoordinates(point)
+	return x ~= nil and y ~= nil and tonumber(point and point.zoneGroup) ~= nil
+end
+
+function runtime.map.GetWorldMapContent()
+	if ADDON == nil or type(ADDON.GetContent) ~= "function" or UIC_WORLDMAP == nil then
+		return nil
+	end
+	local ok, content = SafeCall(ADDON, "GetContent", UIC_WORLDMAP)
+	if ok then
+		return content
+	end
+	return nil
+end
+
+function runtime.map.ClearMapEffects()
+	local mapWidget = runtime.map.GetWorldMapContent()
+	if mapWidget == nil then
+		return
+	end
+	for index = 1, 8 do
+		SafeCall(mapWidget, "ShowSkillMapEffect", 0, 0, 0, 0, index)
+	end
+end
+
+function runtime.map.MarkMap(point)
+	local mapWidget = runtime.map.GetWorldMapContent()
+	if mapWidget == nil then
+		return false
+	end
+	local x, y, z = runtime.map.GetMapCoordinates(point)
+	if x == nil or y == nil then
+		return false
+	end
+	runtime.map.ClearMapEffects()
+	return SafeCall(
+		mapWidget,
+		"ShowSkillMapEffect",
+		x,
+		y,
+		z or 0,
+		runtime.map.MARKER_RADIUS,
+		1
+	) == true
+end
+
+function runtime.map.ScheduleOverlay(point)
+	runtime.mapOverlay = runtime.mapOverlay or {}
+	runtime.mapOverlay.pending = runtime.map.Normalize(point)
+	runtime.mapOverlay.elapsed = runtime.map.RETRY_SECONDS
+	runtime.mapOverlay.attempts = 0
+end
+
+function runtime.map.UpdatePendingOverlay(dt)
+	local state = runtime.mapOverlay
+	if state == nil or state.pending == nil then
+		return
+	end
+	local delta = tonumber(dt) or 0
+	if delta > 1 then
+		delta = delta / 1000
+	end
+	state.elapsed = (tonumber(state.elapsed) or 0) + delta
+	if state.elapsed < runtime.map.RETRY_SECONDS then
+		return
+	end
+	state.elapsed = 0
+	state.attempts = (tonumber(state.attempts) or 0) + 1
+	if runtime.map.MarkMap(state.pending) or state.attempts >= runtime.map.RETRY_LIMIT then
+		state.pending = nil
+	end
+end
+
+function runtime.map.Open(point)
+	point = runtime.map.Normalize(point)
+	if not runtime.map.HasCoordinates(point) then
+		return false
+	end
+	local x, y, z = runtime.map.GetMapCoordinates(point)
+	local zoneGroup = tonumber(point.zoneGroup)
+	if zoneGroup == nil or x == nil or y == nil or X2Map == nil then
+		return false
+	end
+	local ok = SafeCall(X2Map, "ShowWorldmapLocation", zoneGroup, x, y, z or 0)
+	if ok then
+		runtime.map.ScheduleOverlay(point)
+	end
+	return ok == true
+end
+
+function runtime.map.RefreshNoteMapButton()
+	local noteWindow = runtime.noteWindow
+	if noteWindow == nil or noteWindow.mapButton == nil then
+		return
+	end
+	local entry = runtime.friendly[runtime.noteTargetKey] or runtime.hostile[runtime.noteTargetKey]
+	local hasLocation = runtime.map.HasCoordinates(runtime.map.GetEntryLocation(entry))
+	noteWindow.mapButton:Enable(hasLocation)
+end
+
+function runtime.map.OpenNoteTargetLocation()
+	local entry = runtime.friendly[runtime.noteTargetKey] or runtime.hostile[runtime.noteTargetKey]
+	local point = runtime.map.GetEntryLocation(entry)
+	-- No saved coordinates: do not open the world map.
+	if not runtime.map.HasCoordinates(point) then
+		runtime.map.RefreshNoteMapButton()
+		return false
+	end
+	return runtime.map.Open(point)
+end
+
 local function GetCurrentDateTimeText()
 	if type(os) == "table" and type(os.date) == "function" then
 		local ok, value = pcall(os.date, "%Y-%m-%d %H:%M:%S")
@@ -1089,6 +1371,12 @@ local function LoadSavedEntry(keyOrIndex, entry, list, order)
 		if note ~= nil then
 			runtime.notes[key] = NormalizeNoteText(note)
 		end
+		if type(entry) == "table" and type(entry.location) == "table" and list[key] ~= nil then
+			local location = runtime.map.Normalize(entry.location)
+			if location ~= nil then
+				list[key].location = location
+			end
+		end
 	end
 end
 
@@ -1127,13 +1415,18 @@ local function BuildSavedList(list, order)
 	local saved = {}
 	for _, key in ipairs(order) do
 		if list[key] ~= nil then
-			table.insert(saved, {
+			local savedEntry = {
 				key = key,
 				name = GetEntryName(list[key]),
 				unitId = GetEntryUnitId(list[key]) or "",
 				addedAt = GetEntryAddedAt(list[key]) or "",
 				note = runtime.notes[key] or "",
-			})
+			}
+			local location = runtime.map.GetEntryLocation(list[key])
+			if location ~= nil then
+				savedEntry.location = location
+			end
+			table.insert(saved, savedEntry)
 		end
 	end
 	return saved
@@ -2194,9 +2487,13 @@ local function SyncTrackedEntryForRecord(record)
 	if trackedKey ~= record.key then
 		local markerIndex = runtime.markersByKey[trackedKey]
 		local preservedAddedAt = GetEntryAddedAt(entry)
+		local preservedLocation = runtime.map.GetEntryLocation(entry)
 		RemoveOrderedEntry(list, order, trackedKey)
 		MigrateTrackedKey(trackedKey, record.key)
 		AddOrderedEntry(list, order, record.key, record.name, record.unitId, preservedAddedAt)
+		if preservedLocation ~= nil and list[record.key] ~= nil then
+			list[record.key].location = preservedLocation
+		end
 		if markerIndex ~= nil then
 			RememberMarkerForKey(record.key, markerIndex)
 		end
@@ -2276,8 +2573,11 @@ AddCurrentTargetToList = function(listName)
 
 	local existingList, existingKey = FindTrackedEntry(record.key, record.unitId)
 	local preservedAddedAt = nil
+	local preservedLocation = nil
 	if existingKey ~= nil then
-		preservedAddedAt = GetEntryAddedAt(runtime.friendly[existingKey] or runtime.hostile[existingKey])
+		local existingEntry = runtime.friendly[existingKey] or runtime.hostile[existingKey]
+		preservedAddedAt = GetEntryAddedAt(existingEntry)
+		preservedLocation = runtime.map.GetEntryLocation(existingEntry)
 	end
 	if existingList == "friendly" and existingKey ~= nil then
 		if existingKey ~= record.key then
@@ -2305,10 +2605,24 @@ AddCurrentTargetToList = function(listName)
 		AddOrderedEntry(runtime.hostile, runtime.hostileOrder, record.key, record.name, record.unitId, preservedAddedAt)
 	end
 
+	-- Stamp local-player coordinates at the moment this player is added to a list.
+	local addedEntry = runtime.friendly[record.key] or runtime.hostile[record.key]
+	if addedEntry ~= nil then
+		local location = runtime.map.CaptureLocalPlayer()
+		if location ~= nil then
+			addedEntry.location = location
+		elseif preservedLocation ~= nil then
+			addedEntry.location = preservedLocation
+		end
+	end
+
 	SaveLists()
 	RefreshTargetState()
 	if UpdateViewWindow ~= nil then
 		UpdateViewWindow()
+	end
+	if runtime.noteWindow ~= nil and runtime.noteWindow:IsVisible() and runtime.noteTargetKey == record.key then
+		runtime.map.RefreshNoteMapButton()
 	end
 end
 
@@ -2533,17 +2847,28 @@ local function CreateNoteWindow()
 	end
 
 	local actionY = dateY + NOTE_DATE_LABEL_HEIGHT + NOTE_AFTER_DATE_GAP
+	local mapButtonX = NOTE_WINDOW_WIDTH - PADDING - BUTTON_WIDTH - BUTTON_GAP - runtime.map.BUTTON_SIZE
 	noteWindow.statusLabel = CreateLabel(
 		noteWindow,
 		"dpsBasicsUnitTrackerNoteStatus",
 		"",
-		NOTE_WINDOW_WIDTH - BUTTON_WIDTH - (PADDING * 3),
+		mapButtonX - PADDING - 4,
 		18,
 		PADDING,
 		actionY + 4,
 		10,
 		{ 0.72, 0.86, 1, 1 }
 	)
+
+	-- Map button sits immediately left of Save; opens saved add-location like kill_count history.
+	noteWindow.mapButton = noteWindow:CreateChildWidget("button", "dpsBasicsUnitTrackerNoteMapButton", 0, true)
+	noteWindow.mapButton:SetStyle("text_default")
+	noteWindow.mapButton:SetText("M")
+	noteWindow.mapButton:SetExtent(runtime.map.BUTTON_SIZE, runtime.map.BUTTON_SIZE)
+	noteWindow.mapButton:AddAnchor("TOPLEFT", noteWindow, mapButtonX, actionY)
+	noteWindow.mapButton:Show(true)
+	noteWindow.mapButton:Enable(false)
+
 	noteWindow.saveButton = CreateButton(
 		noteWindow,
 		"dpsBasicsUnitTrackerNoteSaveButton",
@@ -2580,12 +2905,18 @@ local function CreateNoteWindow()
 	end
 	noteWindow.closeButton:SetHandler("OnClick", noteWindow.closeButton.OnClick)
 
+	function noteWindow.mapButton:OnClick()
+		runtime.map.OpenNoteTargetLocation()
+	end
+	noteWindow.mapButton:SetHandler("OnClick", noteWindow.mapButton.OnClick)
+
 	function noteWindow.saveButton:OnClick()
 		SaveNoteFromInput()
 	end
 	noteWindow.saveButton:SetHandler("OnClick", noteWindow.saveButton.OnClick)
 
 	function noteWindow:OnUpdate(dt)
+		runtime.map.UpdatePendingOverlay(dt)
 		PollNoteEditBox(dt)
 	end
 	noteWindow:SetHandler("OnUpdate", noteWindow.OnUpdate)
@@ -2613,6 +2944,7 @@ local function OpenNoteWindow(key)
 	end
 	SetEditBoxText(runtime.noteInputState, runtime.noteText, true)
 	SetWindowStatus(noteWindow, "", { 0.72, 0.86, 1, 1 })
+	runtime.map.RefreshNoteMapButton()
 	noteWindow:Show(true)
 end
 
@@ -3667,6 +3999,8 @@ local function CreateTrackerWindow()
 		if not runtime.active then
 			return
 		end
+
+		runtime.map.UpdatePendingOverlay(dt)
 
 		local delta = tonumber(dt) or 0
 		if delta > 1 then
