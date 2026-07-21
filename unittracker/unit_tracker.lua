@@ -59,7 +59,6 @@ local SOURCE_CACHE_PRUNE_SECONDS = 5.0
 
 local WINDOW_WIDTH = 242
 local WINDOW_HEIGHT = 112
-local EXPORT_FILE_PREFIX = "dpsbasics_unit_tracker_export_"
 local VIEW_WINDOW_WIDTH = 306
 local VIEW_ROW_HEIGHT = 22
 local VIEW_ROWS_PER_PAGE = 10
@@ -131,6 +130,9 @@ if previousRuntime ~= nil then
 	if previousRuntime.noteWindow ~= nil then
 		previousRuntime.noteWindow:Show(false)
 	end
+	if previousRuntime.exportNotifyWindow ~= nil then
+		previousRuntime.exportNotifyWindow:Show(false)
+	end
 	if previousRuntime.launchButton ~= nil then
 		previousRuntime.launchButton:Show(false)
 	end
@@ -143,6 +145,8 @@ local runtime = {
 	optsWindow = nil,
 	noteWindow = nil,
 	eventWindow = nil,
+	exportNotifyWindow = nil,
+	exportNotifyHideAt = 0,
 	launchButton = nil,
 	friendly = {},
 	hostile = {},
@@ -428,13 +432,8 @@ local function AttachEditBoxHandlers(state)
 			return
 		end
 
-		-- Insert a line break at the caret when possible; otherwise append.
-		local inserted = SafeCall(input, "Insert", "\n")
-		if inserted then
-			PollEditBoxText(state)
-			return
-		end
-		ApplyEditBoxText(state, ReadEditBoxText(state) .. "\n", true)
+		-- Multiline editboxes already insert one newline on Enter; only sync state.
+		PollEditBoxText(state)
 	end
 
 	SafeCall(input, "SetHandler", "OnClick", ActivateInput)
@@ -1195,6 +1194,28 @@ function runtime.map.OpenNoteTargetLocation()
 		return false
 	end
 	return runtime.map.Open(point)
+end
+
+function runtime.map.FormatExportCoordinates(entry)
+	local point = runtime.map.GetEntryLocation(entry)
+	if point == nil then
+		return ""
+	end
+	local x, y, z = runtime.map.GetMapCoordinates(point)
+	if x == nil or y == nil then
+		x = tonumber(point.x)
+		y = tonumber(point.y)
+		z = tonumber(point.z) or 0
+	end
+	if x == nil or y == nil then
+		return ""
+	end
+	local text = tostring(x) .. ", " .. tostring(y) .. ", " .. tostring(z or 0)
+	local zoneGroup = tonumber(point.zoneGroup)
+	if zoneGroup ~= nil then
+		text = text .. " | zone " .. tostring(zoneGroup)
+	end
+	return text
 end
 
 local function GetCurrentDateTimeText()
@@ -1999,13 +2020,47 @@ end
 
 local function BuildExportFilePaths(fileName)
 	local paths = {}
+	-- Prefer the loaded addon directory, then the Documents/Addon path used by other addons.
 	local sourceDirectory = GetAddonSourceDirectory()
 	if sourceDirectory ~= nil then
 		AddUniquePath(paths, sourceDirectory .. "/" .. fileName)
 	end
+	AddUniquePath(paths, "../Documents/Addon/dpsbasics/" .. fileName)
 	AddUniquePath(paths, "dpsbasics/" .. fileName)
-	AddUniquePath(paths, fileName)
 	return paths
+end
+
+function listSave.ExportFileExists(fileName)
+	for _, path in ipairs(BuildExportFilePaths(fileName)) do
+		local file = TryOpenFile(path, "r")
+		if file ~= nil then
+			pcall(function()
+				file:close()
+			end)
+			return true
+		end
+	end
+	return false
+end
+
+function listSave.GetExportEpochText()
+	if type(os) == "table" and type(os.time) == "function" then
+		local ok, value = pcall(os.time)
+		if ok and tonumber(value) ~= nil then
+			return tostring(math.floor(tonumber(value)))
+		end
+	end
+	return tostring(math.floor((Now() * 1000) + 0.5))
+end
+
+-- Dated export name; if that file already exists today, append unix epoch.
+function listSave.BuildExportFileName()
+	local dateText = string.gsub(tostring(GetCurrentDateText()), "[^%w%-_]", "-")
+	local fileName = "export_unit_tracker_" .. dateText .. ".txt"
+	if listSave.ExportFileExists(fileName) then
+		fileName = "export_unit_tracker_" .. dateText .. "_" .. listSave.GetExportEpochText() .. ".txt"
+	end
+	return fileName
 end
 
 local function WriteExportSection(file, sectionTitle, list, order)
@@ -2022,11 +2077,10 @@ local function WriteExportSection(file, sectionTitle, list, order)
 			local addedAt = GetEntryAddedAt(list[key])
 			file:write("\t")
 			file:write(EscapeFileField(addedAt or ""))
-			local note = NormalizeNoteText(runtime.notes[key] or "")
-			if note ~= "" then
-				file:write("\t")
-				file:write(EscapeFileField(note))
-			end
+			file:write("\t")
+			file:write(EscapeFileField(NormalizeNoteText(runtime.notes[key] or "")))
+			file:write("\t")
+			file:write(EscapeFileField(runtime.map.FormatExportCoordinates(list[key])))
 			file:write("\n")
 		end
 	end
@@ -2070,10 +2124,12 @@ DispatchExportStatus = function(message)
 end
 
 local function ExportPlayerLists()
-	local fileName = EXPORT_FILE_PREFIX .. GetCurrentDateText() .. ".txt"
-	local exported, path, exportError = WriteExportFile(fileName)
+	local exported, path, exportError = WriteExportFile(listSave.BuildExportFileName())
 	if exported then
 		DispatchExportStatus("[Unit Tracker] Exported to " .. tostring(path) .. ".")
+		if listSave.ShowExportNotify ~= nil then
+			listSave.ShowExportNotify("Export successful.", path)
+		end
 	else
 		local message = "[Unit Tracker] Export failed."
 		if exportError ~= nil and tostring(exportError) ~= "" then
@@ -2711,6 +2767,78 @@ local function CreateLabel(parent, name, text, width, height, x, y, fontSize, co
 	label.style:SetOutline(true)
 	label:AddAnchor("TOPLEFT", parent, x, y)
 	return label
+end
+
+-- Brief on-screen export confirmation; auto-hides after a few seconds.
+function listSave.ShowExportNotify(message, path)
+	local width = 420
+	local height = 54
+	local window = runtime.exportNotifyWindow
+	if window == nil then
+		window = CreateEmptyWindow("dpsBasicsUnitTrackerExportNotify", "UIParent")
+		runtime.exportNotifyWindow = window
+		window:SetExtent(width, height)
+		window:AddAnchor("TOP", "UIParent", 0, 120)
+		window:Clickable(false)
+		window:Show(false)
+
+		local background = window:CreateColorDrawable(0, 0, 0, 0.82, "background")
+		background:AddAnchor("TOPLEFT", window, 0, 0)
+		background:AddAnchor("BOTTOMRIGHT", window, 0, 0)
+
+		window.messageLabel = CreateLabel(
+			window,
+			"dpsBasicsUnitTrackerExportNotifyLabel",
+			"",
+			width - 16,
+			18,
+			8,
+			6,
+			12,
+			{ 0.72, 0.95, 0.55, 1 }
+		)
+		if window.messageLabel.style ~= nil then
+			window.messageLabel.style:SetAlign(ALIGN_CENTER)
+		end
+
+		window.pathLabel = CreateLabel(
+			window,
+			"dpsBasicsUnitTrackerExportNotifyPath",
+			"",
+			width - 16,
+			18,
+			8,
+			28,
+			10,
+			{ 0.78, 0.84, 0.92, 1 }
+		)
+		if window.pathLabel.style ~= nil then
+			window.pathLabel.style:SetAlign(ALIGN_CENTER)
+		end
+	else
+		window:SetExtent(width, height)
+	end
+
+	window.messageLabel:SetText(tostring(message or "Export successful."))
+	if window.pathLabel ~= nil then
+		window.pathLabel:SetText(tostring(path or ""))
+	end
+	window:Show(true)
+	runtime.exportNotifyHideAt = Now() + 4
+end
+
+function listSave.UpdateExportNotify()
+	local hideAt = tonumber(runtime.exportNotifyHideAt) or 0
+	if hideAt <= 0 then
+		return
+	end
+	if Now() < hideAt then
+		return
+	end
+	runtime.exportNotifyHideAt = 0
+	if runtime.exportNotifyWindow ~= nil then
+		runtime.exportNotifyWindow:Show(false)
+	end
 end
 
 local function CreateButton(parent, name, text, x, y)
@@ -4064,6 +4192,14 @@ runtime.eventWindow = eventWindow
 eventWindow:SetExtent(1, 1)
 eventWindow:AddAnchor("TOPLEFT", "UIParent", -100, -100)
 eventWindow:Show(true)
+
+function eventWindow:OnUpdate(dt)
+	if not runtime.active then
+		return
+	end
+	listSave.UpdateExportNotify()
+end
+eventWindow:SetHandler("OnUpdate", eventWindow.OnUpdate)
 
 function eventWindow:OnEvent(event, ...)
 	if not runtime.active then
