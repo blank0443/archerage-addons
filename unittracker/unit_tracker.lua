@@ -2290,8 +2290,8 @@ local function UpdateWindowText()
 	end
 	line1:SetText(preview1 or "")
 	line2:SetText(preview2 or "")
-	SetLabelColor(line1, { 0.9, 0.9, 0.9, 1 })
-	SetLabelColor(line2, { 0.9, 0.9, 0.9, 1 })
+	SetLabelColor(line1, { 1, 0.9, 0.35, 1 })
+	SetLabelColor(line2, { 1, 0.9, 0.35, 1 })
 end
 
 local function IsHostileMarker(markerIndex)
@@ -2540,6 +2540,16 @@ local function RefreshTargetState()
 
 	if targetChanged or listChanged or noteChanged then
 		UpdateWindowText()
+	end
+
+	-- Hostile + notes: open the main tracker so the note preview is visible.
+	if listName == "hostile"
+		and note ~= ""
+		and (targetChanged or listChanged or noteChanged)
+		and runtime.window ~= nil
+		and not runtime.window:IsVisible()
+	then
+		runtime.window:Show(true)
 	end
 
 	if targetChanged or listChanged then
