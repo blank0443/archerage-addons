@@ -1313,6 +1313,19 @@ local function MigrateTrackedKey(oldKey, newKey)
 	if runtime.lastMarkedKey == oldKey then
 		runtime.lastMarkedKey = newKey
 	end
+
+	local markerIndex = runtime.markersByKey[oldKey]
+	if markerIndex ~= nil then
+		runtime.markersByKey[oldKey] = nil
+		if runtime.markersByKey[newKey] == nil then
+			runtime.markersByKey[newKey] = markerIndex
+			if runtime.keysByMarker[markerIndex] == oldKey then
+				runtime.keysByMarker[markerIndex] = newKey
+			end
+		elseif runtime.keysByMarker[markerIndex] == oldKey then
+			runtime.keysByMarker[markerIndex] = nil
+		end
+	end
 end
 
 local function AddOrderedEntry(list, order, key, name, unitId, addedAt)
@@ -1370,25 +1383,26 @@ local function LoadSavedEntry(keyOrIndex, entry, list, order)
 	local key = nil
 	local name = nil
 	local note = nil
-	local unitId = nil
 	local addedAt = nil
 
 	if type(entry) == "table" then
 		name = Trim(entry.name or entry.displayName or entry.identity)
-		key = NormalizeName(entry.key or entry.identity or name)
+		-- Canonicalize with StripWorldSuffix so Name and Name@World share one key.
+		key = GetPlayerNameKey(entry.key or entry.identity or name) or ""
 		note = entry.note or entry.notes or entry[3]
-		unitId = entry.unitId or entry.playerId or entry.id
 		addedAt = entry.addedAt or entry.added or entry.dateAdded
 	elseif type(keyOrIndex) == "number" then
 		name = Trim(entry)
-		key = NormalizeName(name)
+		key = GetPlayerNameKey(name) or ""
 	else
 		name = Trim(entry)
-		key = NormalizeName(keyOrIndex)
+		key = GetPlayerNameKey(keyOrIndex) or GetPlayerNameKey(name) or ""
 	end
 
 	if key ~= "" and name ~= "" then
-		AddOrderedEntry(list, order, key, name, unitId, addedAt)
+		-- Skip persisted unitIds: they go stale across zones/sessions and can
+		-- remap an unrelated target onto a saved entry via unitIdKeys.
+		AddOrderedEntry(list, order, key, name, nil, addedAt)
 		if note ~= nil then
 			runtime.notes[key] = NormalizeNoteText(note)
 		end
@@ -1397,6 +1411,24 @@ local function LoadSavedEntry(keyOrIndex, entry, list, order)
 			if location ~= nil then
 				list[key].location = location
 			end
+		end
+	end
+end
+
+-- Unit ids are session-local. Drop reverse maps and live entry ids so a recycled
+-- id cannot migrate another player's list membership / notes / location.
+local function ClearSessionUnitIds()
+	runtime.unitIdKeys = {}
+	for _, key in ipairs(runtime.friendlyOrder) do
+		local entry = runtime.friendly[key]
+		if type(entry) == "table" then
+			entry.unitId = nil
+		end
+	end
+	for _, key in ipairs(runtime.hostileOrder) do
+		local entry = runtime.hostile[key]
+		if type(entry) == "table" then
+			entry.unitId = nil
 		end
 	end
 end
@@ -2168,8 +2200,13 @@ GetTargetRecord = function()
 		return nil
 	end
 
+	local key = GetPlayerNameKey(displayName)
+	if key == nil then
+		return nil
+	end
+
 	return {
-		key = NormalizeName(displayName),
+		key = key,
 		name = displayName,
 		unitId = GetCurrentTargetUnitId(),
 	}
@@ -2645,21 +2682,24 @@ AddCurrentTargetToList = function(listName)
 		preservedAddedAt = GetEntryAddedAt(existingEntry)
 		preservedLocation = runtime.map.GetEntryLocation(existingEntry)
 	end
+	-- Capture location only for new entries or moves between lists, not re-adds.
+	local shouldCaptureLocation = existingKey == nil or existingList ~= listName
 	if existingList == "friendly" and existingKey ~= nil then
 		if existingKey ~= record.key then
 			MigrateTrackedKey(existingKey, record.key)
 		end
 		RemoveOrderedEntry(runtime.friendly, runtime.friendlyOrder, existingKey)
 	elseif existingList == "hostile" and existingKey ~= nil then
+		local markerIndex = runtime.markersByKey[existingKey]
+		if listName ~= "hostile" then
+			-- Clear the visual marker while ownership is still known.
+			ClearOwnedHostileMarker(record)
+		end
 		if existingKey ~= record.key then
 			MigrateTrackedKey(existingKey, record.key)
 		end
-		local markerIndex = runtime.markersByKey[existingKey]
 		RemoveOrderedEntry(runtime.hostile, runtime.hostileOrder, existingKey)
-		if listName ~= "hostile" then
-			ForgetMarkerForKey(existingKey)
-			ForgetMarkerForKey(record.key)
-		elseif markerIndex ~= nil and existingKey ~= record.key then
+		if listName == "hostile" and markerIndex ~= nil and existingKey ~= record.key then
 			RememberMarkerForKey(record.key, markerIndex)
 		end
 	end
@@ -2671,12 +2711,16 @@ AddCurrentTargetToList = function(listName)
 		AddOrderedEntry(runtime.hostile, runtime.hostileOrder, record.key, record.name, record.unitId, preservedAddedAt)
 	end
 
-	-- Stamp local-player coordinates at the moment this player is added to a list.
+	-- Stamp local-player coordinates when newly added or moved between lists.
 	local addedEntry = runtime.friendly[record.key] or runtime.hostile[record.key]
 	if addedEntry ~= nil then
-		local location = runtime.map.CaptureLocalPlayer()
-		if location ~= nil then
-			addedEntry.location = location
+		if shouldCaptureLocation then
+			local location = runtime.map.CaptureLocalPlayer()
+			if location ~= nil then
+				addedEntry.location = location
+			elseif preservedLocation ~= nil then
+				addedEntry.location = preservedLocation
+			end
 		elseif preservedLocation ~= nil then
 			addedEntry.location = preservedLocation
 		end
@@ -2702,14 +2746,19 @@ local function RemoveNameFromList(listName, key)
 	if listName == "friendly" then
 		RemoveOrderedEntry(runtime.friendly, runtime.friendlyOrder, key)
 	elseif listName == "hostile" then
-		RemoveOrderedEntry(runtime.hostile, runtime.hostileOrder, key)
+		-- Resolve current-target ownership before RemoveOrderedEntry clears unitIdKeys.
 		local record = runtime.currentTarget or GetTargetRecord()
 		local recordUnitId = record ~= nil and NormalizeUnitId(record.unitId) or nil
-		if record ~= nil and (record.key == key or (recordUnitId ~= nil and runtime.unitIdKeys[recordUnitId] == key)) then
+		local isCurrentTarget = record ~= nil and (
+			record.key == key
+			or (recordUnitId ~= nil and runtime.unitIdKeys[recordUnitId] == key)
+		)
+		if isCurrentTarget then
 			ClearOwnedHostileMarker(record)
 		else
 			ForgetMarkerForKey(key)
 		end
+		RemoveOrderedEntry(runtime.hostile, runtime.hostileOrder, key)
 	end
 
 	if runtime.friendly[key] == nil and runtime.hostile[key] == nil then
@@ -4132,41 +4181,6 @@ local function CreateTrackerWindow()
 		OpenOptsWindow()
 	end
 	window.optsButton:SetHandler("OnClick", window.optsButton.OnClick)
-
-	function window:OnUpdate(dt)
-		if not runtime.active then
-			return
-		end
-
-		runtime.map.UpdatePendingOverlay(dt)
-
-		local delta = tonumber(dt) or 0
-		if delta > 1 then
-			delta = delta / 1000
-		end
-
-		runtime.updateElapsed = runtime.updateElapsed + delta
-		if runtime.updateElapsed < TARGET_REFRESH_SECONDS then
-			return
-		end
-		runtime.updateElapsed = 0
-		listSave.FlushPending()
-		listSave.MaybePruneSourceCaches()
-		RefreshTargetState()
-	end
-	window:SetHandler("OnUpdate", window.OnUpdate)
-
-	-- Also listen here (combatcloset registers HOTKEY_ACTION on its main visible window).
-	function window:OnEvent(event, ...)
-		if not runtime.active then
-			return
-		end
-		if event == "HOTKEY_ACTION" then
-			hotkeys.OnAction(...)
-		end
-	end
-	window:SetHandler("OnEvent", window.OnEvent)
-	window:RegisterEvent("HOTKEY_ACTION")
 end
 
 LoadLists()
@@ -4198,6 +4212,21 @@ function eventWindow:OnUpdate(dt)
 		return
 	end
 	listSave.UpdateExportNotify()
+	runtime.map.UpdatePendingOverlay(dt)
+
+	local delta = tonumber(dt) or 0
+	if delta > 1 then
+		delta = delta / 1000
+	end
+
+	runtime.updateElapsed = runtime.updateElapsed + delta
+	if runtime.updateElapsed < TARGET_REFRESH_SECONDS then
+		return
+	end
+	runtime.updateElapsed = 0
+	listSave.FlushPending()
+	listSave.MaybePruneSourceCaches()
+	RefreshTargetState()
 end
 eventWindow:SetHandler("OnUpdate", eventWindow.OnUpdate)
 
@@ -4209,6 +4238,7 @@ function eventWindow:OnEvent(event, ...)
 		if event == "ENTERED_WORLD" then
 			-- Unit ids can change across zones; drop the cache so it re-derives.
 			runtime.localPlayerUnitId = nil
+			ClearSessionUnitIds()
 			listSave.FlushNow()
 			hotkeys.RegisterAll()
 		end
@@ -4228,7 +4258,8 @@ function eventWindow:OnEvent(event, ...)
 			return
 		end
 		local sourceName = Trim(select(3, ...) or "")
-		if sourceName == "" or targetName == "" then
+		-- targetName may be empty when unitId already identifies the local player.
+		if sourceName == "" then
 			return
 		end
 		local msg = {
