@@ -21,9 +21,6 @@ if OBJECT_TYPE.WORLD_MAP ~= nil then
 end
 
 ADDON:ImportAPI(API_TYPE.UNIT.id)
-if API_TYPE.TEAM ~= nil then
-	ADDON:ImportAPI(API_TYPE.TEAM.id)
-end
 if API_TYPE.HOTKEY ~= nil then
 	ADDON:ImportAPI(API_TYPE.HOTKEY.id)
 end
@@ -37,67 +34,78 @@ if API_TYPE.MAP ~= nil then
 	ADDON:ImportAPI(API_TYPE.MAP.id)
 end
 
-local SAVE_KEY = "dpsBasicsUnitTrackerLists"
-local LEGACY_SAVE_KEY = "dpsBasicsPlayerTrackerLists"
-local HOTKEY_SAVE_KEY = "dpsBasicsUnitTrackerHotkeys"
-local POSITION_KEY = "dpsBasicsUnitTrackerPosition"
-local LEGACY_POSITION_KEY = "dpsBasicsPlayerTrackerPosition"
-local VIEW_POSITION_KEY = "dpsBasicsUnitTrackerViewPosition"
-local LEGACY_VIEW_POSITION_KEY = "dpsBasicsPlayerTrackerViewPosition"
-local NOTE_POSITION_KEY = "dpsBasicsUnitTrackerNotePosition"
-local LEGACY_NOTE_POSITION_KEY = "dpsBasicsPlayerTrackerNotePosition"
-local OPTS_POSITION_KEY = "dpsBasicsUnitTrackerOptsPosition"
-local HOSTILE_MARKER_INDEX = 12
-local NUMBERED_HOSTILE_MARKERS = { 1, 2, 3, 4, 5, 6, 7, 8, 9 }
-local TARGET_REFRESH_SECONDS = 0.2
-local MARK_RETRY_SECONDS = 1.0
-local PLAYER_NAME_REFRESH_SECONDS = 10.0
-local PLAYER_DAMAGE_SOURCE_CACHE_SECONDS = 10.0
-local AUTO_OPEN_COOLDOWN_SECONDS = 2.0
-local LIST_SAVE_DEBOUNCE_SECONDS = 1.0
-local SOURCE_CACHE_PRUNE_SECONDS = 5.0
+-- Related constants are grouped into tables to stay under Lua 5.1's 200-local limit.
+local persist = {
+	SAVE_KEY = "dpsBasicsUnitTrackerLists",
+	LEGACY_SAVE_KEY = "dpsBasicsPlayerTrackerLists",
+	HOTKEY_SAVE_KEY = "dpsBasicsUnitTrackerHotkeys",
+	POSITION_KEY = "dpsBasicsUnitTrackerPosition",
+	LEGACY_POSITION_KEY = "dpsBasicsPlayerTrackerPosition",
+	VIEW_POSITION_KEY = "dpsBasicsUnitTrackerViewPosition",
+	LEGACY_VIEW_POSITION_KEY = "dpsBasicsPlayerTrackerViewPosition",
+	NOTE_POSITION_KEY = "dpsBasicsUnitTrackerNotePosition",
+	LEGACY_NOTE_POSITION_KEY = "dpsBasicsPlayerTrackerNotePosition",
+	OPTS_POSITION_KEY = "dpsBasicsUnitTrackerOptsPosition",
+}
 
-local WINDOW_WIDTH = 242
-local WINDOW_HEIGHT = 112
-local VIEW_WINDOW_WIDTH = 306
-local VIEW_ROW_HEIGHT = 22
-local VIEW_ROWS_PER_PAGE = 10
-local VIEW_REMOVE_BUTTON_WIDTH = 24
-local VIEW_CONFIRM_BUTTON_WIDTH = 22
-local VIEW_CONFIRM_GAP = 2
-local VIEW_ROW_ACTION_WIDTH = (VIEW_CONFIRM_BUTTON_WIDTH * 2) + VIEW_CONFIRM_GAP
-local PAGE_BUTTON_WIDTH = 32
-local PAGE_BUTTON_HEIGHT = 20
-local PAGE_LABEL_WIDTH = 48
-local NOTE_WINDOW_WIDTH = 208
-local NOTE_WINDOW_HEIGHT = 198
-local OPTS_WINDOW_WIDTH = 170
-local OPTS_WINDOW_HEIGHT = 168
-local NOTE_PREVIEW_WIDTH = WINDOW_WIDTH - 20
-local NOTE_PREVIEW_LINE_HEIGHT = 16
-local NOTE_PREVIEW_HEIGHT = NOTE_PREVIEW_LINE_HEIGHT * 2
-local NOTE_PREVIEW_TOP = 30
-local PADDING = 10
+local timing = {
+	TARGET_REFRESH_SECONDS = 0.2,
+	MARK_RETRY_SECONDS = 1.0,
+	PLAYER_DAMAGE_SOURCE_CACHE_SECONDS = 10.0,
+	AUTO_OPEN_COOLDOWN_SECONDS = 2.0,
+	LIST_SAVE_DEBOUNCE_SECONDS = 1.0,
+	SOURCE_CACHE_PRUNE_SECONDS = 5.0,
+	EDITBOX_POLL_SECONDS = 0.12,
+}
+
+local markerCfg = {
+	HOSTILE_MARKER_INDEX = 12,
+	NUMBERED_HOSTILE_MARKERS = { 1, 2, 3, 4, 5, 6, 7, 8, 9 },
+}
+
+local ui = {
+	WINDOW_WIDTH = 242,
+	WINDOW_HEIGHT = 112,
+	VIEW_WINDOW_WIDTH = 306,
+	VIEW_ROW_HEIGHT = 22,
+	VIEW_ROWS_PER_PAGE = 10,
+	VIEW_REMOVE_BUTTON_WIDTH = 24,
+	VIEW_CONFIRM_BUTTON_WIDTH = 22,
+	VIEW_CONFIRM_GAP = 2,
+	PAGE_BUTTON_WIDTH = 32,
+	PAGE_BUTTON_HEIGHT = 20,
+	PAGE_LABEL_WIDTH = 48,
+	NOTE_WINDOW_WIDTH = 208,
+	NOTE_WINDOW_HEIGHT = 198,
+	OPTS_WINDOW_WIDTH = 170,
+	OPTS_WINDOW_HEIGHT = 168,
+	NOTE_PREVIEW_LINE_HEIGHT = 16,
+	NOTE_PREVIEW_TOP = 30,
+	PADDING = 10,
+	BUTTON_WIDTH = 70,
+	BUTTON_HEIGHT = 24,
+	BUTTON_GAP = 6,
+	NOTE_INPUT_TOP = 32,
+	NOTE_DATE_LABEL_HEIGHT = 14,
+	NOTE_AFTER_DATE_GAP = 4,
+}
+ui.VIEW_ROW_ACTION_WIDTH = (ui.VIEW_CONFIRM_BUTTON_WIDTH * 2) + ui.VIEW_CONFIRM_GAP
+ui.NOTE_PREVIEW_WIDTH = ui.WINDOW_WIDTH - 20
+ui.NOTE_PREVIEW_HEIGHT = ui.NOTE_PREVIEW_LINE_HEIGHT * 2
 -- Single tabbed list: title(38) + tabs(28) + filter/sort(28) + header(22) = 116 top,
 -- then the rows, then a bottom padding.
-local VIEW_HEIGHT = 114 + (VIEW_ROWS_PER_PAGE * VIEW_ROW_HEIGHT) + PADDING
-local BUTTON_WIDTH = 70
-local BUTTON_HEIGHT = 24
-local BUTTON_GAP = 6
+ui.VIEW_HEIGHT = 114 + (ui.VIEW_ROWS_PER_PAGE * ui.VIEW_ROW_HEIGHT) + ui.PADDING
 -- Sticky-note body: equal side padding, date under input, compact footer.
-local NOTE_INPUT_SIDE_PADDING = PADDING
-local NOTE_INPUT_LEFT = NOTE_INPUT_SIDE_PADDING
-local NOTE_INPUT_WIDTH = NOTE_WINDOW_WIDTH - (NOTE_INPUT_SIDE_PADDING * 2)
-local NOTE_INPUT_TOP = 32
-local NOTE_DATE_LABEL_HEIGHT = 14
-local NOTE_AFTER_DATE_GAP = 4
-local NOTE_INPUT_HEIGHT = NOTE_WINDOW_HEIGHT
-	- NOTE_INPUT_TOP
-	- NOTE_DATE_LABEL_HEIGHT
-	- NOTE_AFTER_DATE_GAP
-	- BUTTON_HEIGHT
-	- PADDING
-local EDITBOX_POLL_SECONDS = 0.12
+ui.NOTE_INPUT_SIDE_PADDING = ui.PADDING
+ui.NOTE_INPUT_LEFT = ui.NOTE_INPUT_SIDE_PADDING
+ui.NOTE_INPUT_WIDTH = ui.NOTE_WINDOW_WIDTH - (ui.NOTE_INPUT_SIDE_PADDING * 2)
+ui.NOTE_INPUT_HEIGHT = ui.NOTE_WINDOW_HEIGHT
+	- ui.NOTE_INPUT_TOP
+	- ui.NOTE_DATE_LABEL_HEIGHT
+	- ui.NOTE_AFTER_DATE_GAP
+	- ui.BUTTON_HEIGHT
+	- ui.PADDING
+
 
 -- Single source of truth for the Friendly (green) and Hostile (red) text colors.
 -- Matches the main Unit Tracker window's Friendly/Hostile buttons; change here to
@@ -105,6 +113,7 @@ local EDITBOX_POLL_SECONDS = 0.12
 local LIST_COLORS = {
 	friendly = { 0.05, 0.42, 0.12, 1 },
 	hostile = { 1, 0.35, 0.35, 1 },
+	guild = { 0.35, 0.7, 1, 1 },
 }
 
 local previousRuntime = _G.__DPS_BASICS_UNIT_TRACKER_RUNTIME or _G.__DPS_BASICS_PLAYER_TRACKER_RUNTIME
@@ -140,6 +149,7 @@ end
 
 local runtime = {
 	active = true,
+	loading = false,
 	window = nil,
 	viewWindow = nil,
 	optsWindow = nil,
@@ -179,22 +189,21 @@ local runtime = {
 	markersByKey = {},
 	keysByMarker = {},
 	unitIdKeys = {},
+	markerWriteAttempts = {},
 	currentTarget = nil,
 	updateElapsed = 0,
 	lastMarkedKey = nil,
 	lastMarkedMarker = nil,
 	lastMarkTime = 0,
-	lastMarkerWriteTime = -MARK_RETRY_SECONDS,
+	lastMarkerWriteTime = -timing.MARK_RETRY_SECONDS,
 	editboxPollElapsed = 0,
 	noteTargetKey = nil,
 	noteText = "",
 	noteInputState = nil,
 	noteInput = nil,
-	knownPlayerNames = {},
-	knownPlayerNamesUpdatedAt = -PLAYER_NAME_REFRESH_SECONDS,
 	recentPlayerDamageSourceTimes = {},
 	pendingDamageSourceTimes = {},
-	lastAutoOpenTime = -AUTO_OPEN_COOLDOWN_SECONDS,
+	lastAutoOpenTime = -timing.AUTO_OPEN_COOLDOWN_SECONDS,
 	listsSavePending = false,
 	lastListsSaveAt = 0,
 	lastSourceCachePruneAt = 0,
@@ -246,20 +255,21 @@ local function CompactText(value, maxLength)
 	return string.sub(text, 1, maxLength - 3) .. "..."
 end
 
-local EDITBOX_GETTER_METHODS = {
-	"GetText",
-	"GetInputText",
-	"GetEditText",
-	"GetDisplayText",
-	"GetString",
-}
-
-local EDITBOX_SETTER_METHODS = {
-	"SetText",
-	"SetInputText",
-	"SetEditText",
-	"SetDisplayText",
-	"SetString",
+local editboxApi = {
+	GETTERS = {
+		"GetText",
+		"GetInputText",
+		"GetEditText",
+		"GetDisplayText",
+		"GetString",
+	},
+	SETTERS = {
+		"SetText",
+		"SetInputText",
+		"SetEditText",
+		"SetDisplayText",
+		"SetString",
+	},
 }
 
 local function FirstStringArg(...)
@@ -283,7 +293,7 @@ local function ReadEditBoxText(state)
 		return state ~= nil and state.text or ""
 	end
 
-	for _, methodName in ipairs(EDITBOX_GETTER_METHODS) do
+	for _, methodName in ipairs(editboxApi.GETTERS) do
 		local ok, value = SafeCall(state.widget, methodName)
 		if ok and type(value) == "string" then
 			return value
@@ -299,7 +309,7 @@ local function SyncEditBoxText(state, text, clearWhenEmpty)
 
 	local value = tostring(text or "")
 	state.syncing = true
-	for _, methodName in ipairs(EDITBOX_SETTER_METHODS) do
+	for _, methodName in ipairs(editboxApi.SETTERS) do
 		SafeCall(state.widget, methodName, value)
 	end
 	if clearWhenEmpty == true and value == "" then
@@ -549,42 +559,6 @@ local function GetPlayerNameKey(name)
 	return key
 end
 
-local function RememberKnownPlayerName(name)
-	local key = GetPlayerNameKey(name)
-	if key ~= nil then
-		runtime.knownPlayerNames[key] = true
-	end
-end
-
-local function RefreshKnownPlayerNames()
-	runtime.knownPlayerNames = {}
-	RememberKnownPlayerName(GetLocalPlayerName())
-
-	if X2Team ~= nil then
-		for teamIndex = 0, 2 do
-			for memberIndex = 1, 50 do
-				local ok, memberName = SafeCall(X2Team, "GetTeamMemberName", teamIndex, memberIndex)
-				if ok and IsValidName(memberName) then
-					RememberKnownPlayerName(memberName)
-				end
-			end
-		end
-	end
-	runtime.knownPlayerNamesUpdatedAt = Now()
-end
-
-local function IsKnownPlayerName(name)
-	local key = GetPlayerNameKey(name)
-	if key == nil then
-		return false
-	end
-
-	if Now() - (tonumber(runtime.knownPlayerNamesUpdatedAt) or 0) > PLAYER_NAME_REFRESH_SECONDS then
-		RefreshKnownPlayerNames()
-	end
-	return runtime.knownPlayerNames[key] == true
-end
-
 local function GetLocalPlayerUnitId()
 	-- Cache the id: it is stable within a zone/session and is queried per combat event.
 	if IsValidName(runtime.localPlayerUnitId) then
@@ -631,6 +605,16 @@ local function IsUnitIdPlayerCharacter(unitId)
 	return type(unitInfo) == "table" and unitInfo.type == "character"
 end
 
+-- Prefer false-negative safety: only treat the selected target as a player when
+-- UnitInfo or GetUnitInfoById confirms type "character". NPCs/unknown stay out.
+local function IsSelectedTargetPlayerCharacter(unitId)
+	local okInfo, unitInfo = SafeCall(X2Unit, "UnitInfo", "target")
+	if okInfo and type(unitInfo) == "table" then
+		return unitInfo.type == "character"
+	end
+	return IsUnitIdPlayerCharacter(unitId)
+end
+
 local function GetUnitNameById(unitId, unitInfo)
 	if type(unitInfo) == "table" and IsValidName(unitInfo.name) then
 		return Trim(unitInfo.name)
@@ -649,7 +633,7 @@ end
 -- Drop cache entries older than the damage-source window so these name->time
 -- tables cannot grow without bound during long PvP sessions.
 local function PruneStaleSourceTimes(times)
-	local cutoff = Now() - PLAYER_DAMAGE_SOURCE_CACHE_SECONDS
+	local cutoff = Now() - timing.PLAYER_DAMAGE_SOURCE_CACHE_SECONDS
 	for existingKey, lastSeenAt in pairs(times) do
 		if tonumber(lastSeenAt) == nil or lastSeenAt < cutoff then
 			times[existingKey] = nil
@@ -658,7 +642,7 @@ local function PruneStaleSourceTimes(times)
 end
 
 local function MaybePruneSourceCaches()
-	if Now() - (runtime.lastSourceCachePruneAt or 0) < SOURCE_CACHE_PRUNE_SECONDS then
+	if Now() - (runtime.lastSourceCachePruneAt or 0) < timing.SOURCE_CACHE_PRUNE_SECONDS then
 		return
 	end
 	runtime.lastSourceCachePruneAt = Now()
@@ -681,7 +665,7 @@ local function IsRecentPlayerDamageSourceName(name)
 	end
 
 	local lastSeenAt = tonumber(runtime.recentPlayerDamageSourceTimes[key])
-	return lastSeenAt ~= nil and Now() - lastSeenAt <= PLAYER_DAMAGE_SOURCE_CACHE_SECONDS
+	return lastSeenAt ~= nil and Now() - lastSeenAt <= timing.PLAYER_DAMAGE_SOURCE_CACHE_SECONDS
 end
 
 local function RememberPendingDamageSourceName(name)
@@ -699,7 +683,7 @@ local function IsPendingDamageSourceName(name)
 	end
 
 	local lastSeenAt = tonumber(runtime.pendingDamageSourceTimes[key])
-	return lastSeenAt ~= nil and Now() - lastSeenAt <= PLAYER_DAMAGE_SOURCE_CACHE_SECONDS
+	return lastSeenAt ~= nil and Now() - lastSeenAt <= timing.PLAYER_DAMAGE_SOURCE_CACHE_SECONDS
 end
 
 local function GetCombatEventKind(eventType)
@@ -793,9 +777,9 @@ local function IsVerifiedPlayerDamageSource(sourceName)
 	if not IsValidName(sourceName) or IsLocalPlayerName(sourceName) then
 		return false
 	end
-	-- COMBAT_MSG only exposes a source name, so require a known player name or recent unit-id verification.
-	return IsKnownPlayerName(sourceName)
-		or IsRecentPlayerDamageSourceName(sourceName)
+	-- COMBAT_MSG only exposes a source name; verify via recent unit-id confirmation or current target.
+	-- Team roster is not consulted: party/raid members cannot be the hostile auto-open source.
+	return IsRecentPlayerDamageSourceName(sourceName)
 		or IsCurrentTargetPlayerSource(sourceName)
 end
 
@@ -863,19 +847,19 @@ local function SaveWidgetPosition(widget, key)
 end
 
 local function SaveWindowPosition()
-	SaveWidgetPosition(runtime.window, POSITION_KEY)
+	SaveWidgetPosition(runtime.window, persist.POSITION_KEY)
 end
 
 local function SaveViewWindowPosition()
-	SaveWidgetPosition(runtime.viewWindow, VIEW_POSITION_KEY)
+	SaveWidgetPosition(runtime.viewWindow, persist.VIEW_POSITION_KEY)
 end
 
 local function SaveOptsWindowPosition()
-	SaveWidgetPosition(runtime.optsWindow, OPTS_POSITION_KEY)
+	SaveWidgetPosition(runtime.optsWindow, persist.OPTS_POSITION_KEY)
 end
 
 local function SaveNoteWindowPosition()
-	SaveWidgetPosition(runtime.noteWindow, NOTE_POSITION_KEY)
+	SaveWidgetPosition(runtime.noteWindow, persist.NOTE_POSITION_KEY)
 end
 
 local function LoadPosition(key, defaultX, defaultY, legacyKey)
@@ -923,6 +907,31 @@ local function GetEntryAddedAt(entry)
 		return nil
 	end
 	return addedAt
+end
+
+local function GetEntryGuild(entry)
+	if type(entry) ~= "table" then
+		return ""
+	end
+	return Trim(tostring(entry.guild or entry.expeditionName or entry.guildName or ""))
+end
+
+-- Returns true when the stored guild string changed (including clear-to-blank).
+local function SetEntryGuild(entry, guild)
+	if type(entry) ~= "table" then
+		return false
+	end
+	guild = Trim(tostring(guild or ""))
+	local previous = GetEntryGuild(entry)
+	if guild == previous then
+		return false
+	end
+	if guild == "" then
+		entry.guild = nil
+	else
+		entry.guild = guild
+	end
+	return true
 end
 
 -- Location capture / map open helpers live on runtime.map (avoids a new top-level local).
@@ -1313,6 +1322,27 @@ local function MigrateTrackedKey(oldKey, newKey)
 	if runtime.lastMarkedKey == oldKey then
 		runtime.lastMarkedKey = newKey
 	end
+
+	local attempts = runtime.markerWriteAttempts
+	if type(attempts) == "table" and attempts[oldKey] ~= nil then
+		if attempts[newKey] == nil then
+			attempts[newKey] = attempts[oldKey]
+		end
+		attempts[oldKey] = nil
+	end
+
+	local markerIndex = runtime.markersByKey[oldKey]
+	if markerIndex ~= nil then
+		runtime.markersByKey[oldKey] = nil
+		if runtime.markersByKey[newKey] == nil then
+			runtime.markersByKey[newKey] = markerIndex
+			if runtime.keysByMarker[markerIndex] == oldKey then
+				runtime.keysByMarker[markerIndex] = newKey
+			end
+		elseif runtime.keysByMarker[markerIndex] == oldKey then
+			runtime.keysByMarker[markerIndex] = nil
+		end
+	end
 end
 
 local function AddOrderedEntry(list, order, key, name, unitId, addedAt)
@@ -1370,33 +1400,58 @@ local function LoadSavedEntry(keyOrIndex, entry, list, order)
 	local key = nil
 	local name = nil
 	local note = nil
-	local unitId = nil
 	local addedAt = nil
 
 	if type(entry) == "table" then
 		name = Trim(entry.name or entry.displayName or entry.identity)
-		key = NormalizeName(entry.key or entry.identity or name)
+		-- Canonicalize with StripWorldSuffix so Name and Name@World share one key.
+		key = GetPlayerNameKey(entry.key or entry.identity or name) or ""
 		note = entry.note or entry.notes or entry[3]
-		unitId = entry.unitId or entry.playerId or entry.id
 		addedAt = entry.addedAt or entry.added or entry.dateAdded
 	elseif type(keyOrIndex) == "number" then
 		name = Trim(entry)
-		key = NormalizeName(name)
+		key = GetPlayerNameKey(name) or ""
 	else
 		name = Trim(entry)
-		key = NormalizeName(keyOrIndex)
+		key = GetPlayerNameKey(keyOrIndex) or GetPlayerNameKey(name) or ""
 	end
 
 	if key ~= "" and name ~= "" then
-		AddOrderedEntry(list, order, key, name, unitId, addedAt)
+		-- Skip persisted unitIds: they go stale across zones/sessions and can
+		-- remap an unrelated target onto a saved entry via unitIdKeys.
+		AddOrderedEntry(list, order, key, name, nil, addedAt)
 		if note ~= nil then
 			runtime.notes[key] = NormalizeNoteText(note)
 		end
-		if type(entry) == "table" and type(entry.location) == "table" and list[key] ~= nil then
-			local location = runtime.map.Normalize(entry.location)
-			if location ~= nil then
-				list[key].location = location
+		if type(entry) == "table" then
+			local guild = entry.guild or entry.expeditionName or entry.guildName
+			if guild ~= nil then
+				SetEntryGuild(list[key], guild)
 			end
+			if type(entry.location) == "table" and list[key] ~= nil then
+				local location = runtime.map.Normalize(entry.location)
+				if location ~= nil then
+					list[key].location = location
+				end
+			end
+		end
+	end
+end
+
+-- Unit ids are session-local. Drop reverse maps and live entry ids so a recycled
+-- id cannot migrate another player's list membership / notes / location.
+local function ClearSessionUnitIds()
+	runtime.unitIdKeys = {}
+	for _, key in ipairs(runtime.friendlyOrder) do
+		local entry = runtime.friendly[key]
+		if type(entry) == "table" then
+			entry.unitId = nil
+		end
+	end
+	for _, key in ipairs(runtime.hostileOrder) do
+		local entry = runtime.hostile[key]
+		if type(entry) == "table" then
+			entry.unitId = nil
 		end
 	end
 end
@@ -1420,9 +1475,9 @@ local function LoadSavedList(source, list, order)
 end
 
 local function LoadLists()
-	local data = LoadData(SAVE_KEY)
+	local data = LoadData(persist.SAVE_KEY)
 	if type(data) ~= "table" then
-		data = LoadData(LEGACY_SAVE_KEY)
+		data = LoadData(persist.LEGACY_SAVE_KEY)
 	end
 	if type(data) ~= "table" then
 		return
@@ -1441,6 +1496,7 @@ local function BuildSavedList(list, order)
 				name = GetEntryName(list[key]),
 				unitId = GetEntryUnitId(list[key]) or "",
 				addedAt = GetEntryAddedAt(list[key]) or "",
+				guild = GetEntryGuild(list[key]),
 				note = runtime.notes[key] or "",
 			}
 			local location = runtime.map.GetEntryLocation(list[key])
@@ -1458,7 +1514,7 @@ local function SaveLists(immediate)
 		runtime.listsSavePending = true
 		return
 	end
-	SaveData(SAVE_KEY, {
+	SaveData(persist.SAVE_KEY, {
 		friendly = BuildSavedList(runtime.friendly, runtime.friendlyOrder),
 		hostile = BuildSavedList(runtime.hostile, runtime.hostileOrder),
 	})
@@ -1473,7 +1529,7 @@ function listSave.FlushNow()
 	if not runtime.listsSavePending then
 		return
 	end
-	SaveData(SAVE_KEY, {
+	SaveData(persist.SAVE_KEY, {
 		friendly = BuildSavedList(runtime.friendly, runtime.friendlyOrder),
 		hostile = BuildSavedList(runtime.hostile, runtime.hostileOrder),
 	})
@@ -1485,7 +1541,7 @@ function listSave.FlushPending()
 	if not runtime.listsSavePending then
 		return
 	end
-	if Now() - (runtime.lastListsSaveAt or 0) < LIST_SAVE_DEBOUNCE_SECONDS then
+	if Now() - (runtime.lastListsSaveAt or 0) < timing.LIST_SAVE_DEBOUNCE_SECONDS then
 		return
 	end
 	listSave.FlushNow()
@@ -1720,7 +1776,7 @@ function hotkeys.RegisterAll()
 end
 
 function hotkeys.Save()
-	SaveData(HOTKEY_SAVE_KEY, {
+	SaveData(persist.HOTKEY_SAVE_KEY, {
 		friendly = runtime.hotkeys.friendly or "",
 		hostile = runtime.hotkeys.hostile or "",
 	})
@@ -1733,7 +1789,7 @@ function hotkeys.Load()
 		friendly = nil,
 		hostile = nil,
 	}
-	local data = LoadData(HOTKEY_SAVE_KEY)
+	local data = LoadData(persist.HOTKEY_SAVE_KEY)
 	if type(data) ~= "table" then
 		return
 	end
@@ -1927,12 +1983,16 @@ function hotkeys.OnAction(...)
 		and active.friendly == hotkeys.ACTION_FRIENDLY
 		and Trim(tostring(runtime.hotkeys.friendly or "")) ~= ""
 	then
-		AddCurrentTargetToList("friendly")
+		if AddCurrentTargetToList("friendly") and runtime.window ~= nil then
+			runtime.window:Show(true)
+		end
 	elseif actionName == hotkeys.ACTION_HOSTILE
 		and active.hostile == hotkeys.ACTION_HOSTILE
 		and Trim(tostring(runtime.hotkeys.hostile or "")) ~= ""
 	then
-		AddCurrentTargetToList("hostile")
+		if AddCurrentTargetToList("hostile") and runtime.window ~= nil then
+			runtime.window:Show(true)
+		end
 	end
 end
 
@@ -2153,6 +2213,24 @@ local function GetCurrentTargetUnitId()
 	return nil
 end
 
+-- Guild/expedition name from the selected target.
+-- Second return is true only when character UnitInfo was confirmed (empty then means unguilded).
+local function GetSelectedTargetGuildName()
+	local okInfo, unitInfo = SafeCall(X2Unit, "UnitInfo", "target")
+	if okInfo and type(unitInfo) == "table" and unitInfo.type == "character" then
+		return Trim(tostring(unitInfo.expeditionName or "")), true
+	end
+
+	local unitId = GetCurrentTargetUnitId()
+	if unitId ~= nil then
+		local byId = GetUnitInfoById(unitId)
+		if type(byId) == "table" and byId.type == "character" then
+			return Trim(tostring(byId.expeditionName or "")), true
+		end
+	end
+	return "", false
+end
+
 GetTargetRecord = function()
 	local okWorld, worldName = SafeCall(X2Unit, "UnitNameWithWorld", "target")
 	local okName, name = SafeCall(X2Unit, "UnitName", "target")
@@ -2168,10 +2246,18 @@ GetTargetRecord = function()
 		return nil
 	end
 
+	local key = GetPlayerNameKey(displayName)
+	if key == nil then
+		return nil
+	end
+
+	local guild, guildKnown = GetSelectedTargetGuildName()
 	return {
-		key = NormalizeName(displayName),
+		key = key,
 		name = displayName,
 		unitId = GetCurrentTargetUnitId(),
+		guild = guild,
+		guildKnown = guildKnown == true,
 	}
 end
 
@@ -2209,6 +2295,70 @@ local function MeasureLabelTextWidth(label, text)
 	return nil
 end
 
+-- Painted outline text is wider than GetTextWidth / naive char guesses report.
+-- Prefer over-estimate so guild never starts underneath the name.
+local function EstimateLabelPaintWidth(label, text)
+	text = tostring(text or "")
+	if text == "" then
+		return 0
+	end
+
+	local fontSize = 11
+	if label ~= nil and label.style ~= nil then
+		local okSize, size = pcall(function()
+			return label.style:GetFontSize()
+		end)
+		if okSize and tonumber(size) ~= nil and tonumber(size) > 0 then
+			fontSize = tonumber(size)
+		end
+	end
+
+	-- Size-11 outline glyphs are roughly this wide; keep a floor so short names still clear.
+	local byChars = string.len(text) * (fontSize * 0.85)
+	local measured = MeasureLabelTextWidth(label, text)
+	if measured ~= nil and measured > 0 then
+		-- Inflate API width for outline; take the larger of the two estimates.
+		measured = measured * 1.35 + 6
+		if measured > byChars then
+			return measured
+		end
+	end
+	return byChars + 4
+end
+
+-- Truncate text so its estimated painted width fits maxWidth.
+local function FitTextToLabelWidth(label, text, maxWidth)
+	text = tostring(text or "")
+	maxWidth = tonumber(maxWidth) or 0
+	if text == "" or maxWidth <= 0 then
+		return ""
+	end
+
+	if EstimateLabelPaintWidth(label, text) <= maxWidth then
+		return text
+	end
+
+	local ellipsis = "..."
+	if EstimateLabelPaintWidth(label, ellipsis) > maxWidth then
+		return ""
+	end
+
+	local lo = 1
+	local hi = string.len(text)
+	local best = ellipsis
+	while lo <= hi do
+		local mid = math.floor((lo + hi) / 2)
+		local candidate = string.sub(text, 1, mid) .. ellipsis
+		if EstimateLabelPaintWidth(label, candidate) <= maxWidth then
+			best = candidate
+			lo = mid + 1
+		else
+			hi = mid - 1
+		end
+	end
+	return best
+end
+
 -- Pack note text into at most two preview lines; overflow becomes trailing "...".
 -- Returns line1, line2 (labels do not honor "\n", so callers use two widgets).
 local function FormatNotePreview(note, label, maxWidth)
@@ -2225,7 +2375,7 @@ local function FormatNotePreview(note, label, maxWidth)
 		return "", ""
 	end
 
-	maxWidth = tonumber(maxWidth) or NOTE_PREVIEW_WIDTH
+	maxWidth = tonumber(maxWidth) or ui.NOTE_PREVIEW_WIDTH
 	-- Small inset for outline; slight slack offsets GetTextWidth over-reporting.
 	local usableWidth = maxWidth - 4
 	if usableWidth < 40 then
@@ -2335,7 +2485,7 @@ local function UpdateWindowText()
 
 	local preview1, preview2 = "", ""
 	if note ~= "" then
-		local previewWidth = NOTE_PREVIEW_WIDTH
+		local previewWidth = ui.NOTE_PREVIEW_WIDTH
 		local okWidth, labelWidth = pcall(function()
 			return line1:GetWidth()
 		end)
@@ -2352,10 +2502,10 @@ end
 
 local function IsHostileMarker(markerIndex)
 	markerIndex = tonumber(markerIndex)
-	if markerIndex == HOSTILE_MARKER_INDEX then
+	if markerIndex == markerCfg.HOSTILE_MARKER_INDEX then
 		return true
 	end
-	for _, numberedMarker in ipairs(NUMBERED_HOSTILE_MARKERS) do
+	for _, numberedMarker in ipairs(markerCfg.NUMBERED_HOSTILE_MARKERS) do
 		if markerIndex == numberedMarker then
 			return true
 		end
@@ -2384,14 +2534,14 @@ local function IsMarkerAvailable(markerIndex, targetUnitId)
 end
 
 -- Use X first, then 1-9. When every slot is taken, recycle X onto the new target.
--- Re-scan availability at most once per MARK_RETRY_SECONDS per target.
+-- Re-scan availability at most once per timing.MARK_RETRY_SECONDS per target.
 local function ChooseHostileMarker(record)
 	local cache = runtime.markerScanCache
 	local now = Now()
 	local unitId = NormalizeUnitId(record.unitId)
 	if cache.key == record.key
 		and cache.unitId == unitId
-		and (now - (cache.at or 0)) < MARK_RETRY_SECONDS
+		and (now - (cache.at or 0)) < timing.MARK_RETRY_SECONDS
 	then
 		return cache.index, cache.shouldWrite
 	end
@@ -2406,19 +2556,19 @@ local function ChooseHostileMarker(record)
 		return currentMarker, false
 	end
 
-	local markerIndex = HOSTILE_MARKER_INDEX
-	if IsMarkerAvailable(HOSTILE_MARKER_INDEX, record.unitId) then
-		markerIndex = HOSTILE_MARKER_INDEX
+	local markerIndex = markerCfg.HOSTILE_MARKER_INDEX
+	if IsMarkerAvailable(markerCfg.HOSTILE_MARKER_INDEX, record.unitId) then
+		markerIndex = markerCfg.HOSTILE_MARKER_INDEX
 	else
 		markerIndex = nil
-		for _, numberedMarker in ipairs(NUMBERED_HOSTILE_MARKERS) do
+		for _, numberedMarker in ipairs(markerCfg.NUMBERED_HOSTILE_MARKERS) do
 			if IsMarkerAvailable(numberedMarker, record.unitId) then
 				markerIndex = numberedMarker
 				break
 			end
 		end
 		if markerIndex == nil then
-			markerIndex = HOSTILE_MARKER_INDEX
+			markerIndex = markerCfg.HOSTILE_MARKER_INDEX
 		end
 	end
 
@@ -2460,6 +2610,16 @@ local function ApplyHostileTargetMarker()
 		return
 	end
 
+	-- Cap SetOverHeadMarker tries per player; cleared on ENTERED_WORLD.
+	local attempts = runtime.markerWriteAttempts
+	if type(attempts) ~= "table" then
+		attempts = {}
+		runtime.markerWriteAttempts = attempts
+	end
+	if (tonumber(attempts[trackedKey]) or 0) >= 3 then
+		return
+	end
+
 	local markerIndex, shouldWrite = ChooseHostileMarker(record)
 	if markerIndex == nil then
 		return
@@ -2476,15 +2636,16 @@ local function ApplyHostileTargetMarker()
 	-- Native marker writes have a cooldown, so target polling only writes when the chosen mark changes or the retry gap has elapsed.
 	if runtime.lastMarkedKey == trackedKey
 		and runtime.lastMarkedMarker == markerIndex
-		and (now - runtime.lastMarkTime) < MARK_RETRY_SECONDS
+		and (now - runtime.lastMarkTime) < timing.MARK_RETRY_SECONDS
 	then
 		return
 	end
-	if (now - runtime.lastMarkerWriteTime) < MARK_RETRY_SECONDS then
+	if (now - runtime.lastMarkerWriteTime) < timing.MARK_RETRY_SECONDS then
 		return
 	end
 
 	local ok = SafeCall(X2Unit, "SetOverHeadMarker", "target", markerIndex)
+	attempts[trackedKey] = (tonumber(attempts[trackedKey]) or 0) + 1
 	runtime.lastMarkedKey = trackedKey
 	runtime.lastMarkedMarker = markerIndex
 	runtime.lastMarkTime = now
@@ -2526,6 +2687,8 @@ local function ClearOwnedHostileMarker(record)
 	end
 end
 
+local UpdateViewWindow
+
 local function SyncTrackedEntryForRecord(record)
 	if record == nil then
 		return nil, nil
@@ -2565,8 +2728,21 @@ local function SyncTrackedEntryForRecord(record)
 		end
 	end
 
+	-- Keep list guild in sync with the live selected target (including unguilded).
+	-- Only write when character UnitInfo confirmed the guild field, so unknown
+	-- reads cannot wipe a previously saved guild name.
+	if record.guildKnown and SetEntryGuild(list[trackedKey], record.guild) then
+		changed = true
+	end
+
 	if changed then
 		SaveLists(false)
+		if UpdateViewWindow ~= nil
+			and runtime.viewWindow ~= nil
+			and runtime.viewWindow:IsVisible()
+		then
+			UpdateViewWindow()
+		end
 	end
 	return listName, trackedKey
 end
@@ -2616,8 +2792,8 @@ local function RefreshTargetState()
 			ApplyHostileTargetMarker()
 		end
 	elseif listName == "hostile" and record ~= nil then
-		-- Keep retrying marker writes on the same target without re-scanning every tick.
-		if (Now() - (runtime.lastMarkerWriteTime or 0)) >= MARK_RETRY_SECONDS then
+		-- Retry marker writes on the same target (capped per player in ApplyHostileTargetMarker).
+		if (Now() - (runtime.lastMarkerWriteTime or 0)) >= timing.MARK_RETRY_SECONDS then
 			ApplyHostileTargetMarker()
 		end
 	end
@@ -2628,13 +2804,17 @@ local function RefreshTargetState()
 	runtime.lastRefreshNote = note
 end
 
-local UpdateViewWindow
-
 AddCurrentTargetToList = function(listName)
 	local record = GetTargetRecord()
 	if record == nil then
 		RefreshTargetState()
-		return
+		return false
+	end
+
+	-- Friendly/hostile lists are player-only; reject NPCs and unconfirmed targets.
+	if not IsSelectedTargetPlayerCharacter(record.unitId) then
+		RefreshTargetState()
+		return false
 	end
 
 	local existingList, existingKey = FindTrackedEntry(record.key, record.unitId)
@@ -2645,21 +2825,24 @@ AddCurrentTargetToList = function(listName)
 		preservedAddedAt = GetEntryAddedAt(existingEntry)
 		preservedLocation = runtime.map.GetEntryLocation(existingEntry)
 	end
+	-- Capture location only for new entries or moves between lists, not re-adds.
+	local shouldCaptureLocation = existingKey == nil or existingList ~= listName
 	if existingList == "friendly" and existingKey ~= nil then
 		if existingKey ~= record.key then
 			MigrateTrackedKey(existingKey, record.key)
 		end
 		RemoveOrderedEntry(runtime.friendly, runtime.friendlyOrder, existingKey)
 	elseif existingList == "hostile" and existingKey ~= nil then
+		local markerIndex = runtime.markersByKey[existingKey]
+		if listName ~= "hostile" then
+			-- Clear the visual marker while ownership is still known.
+			ClearOwnedHostileMarker(record)
+		end
 		if existingKey ~= record.key then
 			MigrateTrackedKey(existingKey, record.key)
 		end
-		local markerIndex = runtime.markersByKey[existingKey]
 		RemoveOrderedEntry(runtime.hostile, runtime.hostileOrder, existingKey)
-		if listName ~= "hostile" then
-			ForgetMarkerForKey(existingKey)
-			ForgetMarkerForKey(record.key)
-		elseif markerIndex ~= nil and existingKey ~= record.key then
+		if listName == "hostile" and markerIndex ~= nil and existingKey ~= record.key then
 			RememberMarkerForKey(record.key, markerIndex)
 		end
 	end
@@ -2671,12 +2854,19 @@ AddCurrentTargetToList = function(listName)
 		AddOrderedEntry(runtime.hostile, runtime.hostileOrder, record.key, record.name, record.unitId, preservedAddedAt)
 	end
 
-	-- Stamp local-player coordinates at the moment this player is added to a list.
+	-- Stamp local-player coordinates when newly added or moved between lists.
 	local addedEntry = runtime.friendly[record.key] or runtime.hostile[record.key]
 	if addedEntry ~= nil then
-		local location = runtime.map.CaptureLocalPlayer()
-		if location ~= nil then
-			addedEntry.location = location
+		if record.guildKnown then
+			SetEntryGuild(addedEntry, record.guild)
+		end
+		if shouldCaptureLocation then
+			local location = runtime.map.CaptureLocalPlayer()
+			if location ~= nil then
+				addedEntry.location = location
+			elseif preservedLocation ~= nil then
+				addedEntry.location = preservedLocation
+			end
 		elseif preservedLocation ~= nil then
 			addedEntry.location = preservedLocation
 		end
@@ -2690,6 +2880,7 @@ AddCurrentTargetToList = function(listName)
 	if runtime.noteWindow ~= nil and runtime.noteWindow:IsVisible() and runtime.noteTargetKey == record.key then
 		runtime.map.RefreshNoteMapButton()
 	end
+	return true
 end
 
 local function RemoveNameFromList(listName, key)
@@ -2702,14 +2893,19 @@ local function RemoveNameFromList(listName, key)
 	if listName == "friendly" then
 		RemoveOrderedEntry(runtime.friendly, runtime.friendlyOrder, key)
 	elseif listName == "hostile" then
-		RemoveOrderedEntry(runtime.hostile, runtime.hostileOrder, key)
+		-- Resolve current-target ownership before RemoveOrderedEntry clears unitIdKeys.
 		local record = runtime.currentTarget or GetTargetRecord()
 		local recordUnitId = record ~= nil and NormalizeUnitId(record.unitId) or nil
-		if record ~= nil and (record.key == key or (recordUnitId ~= nil and runtime.unitIdKeys[recordUnitId] == key)) then
+		local isCurrentTarget = record ~= nil and (
+			record.key == key
+			or (recordUnitId ~= nil and runtime.unitIdKeys[recordUnitId] == key)
+		)
+		if isCurrentTarget then
 			ClearOwnedHostileMarker(record)
 		else
 			ForgetMarkerForKey(key)
 		end
+		RemoveOrderedEntry(runtime.hostile, runtime.hostileOrder, key)
 	end
 
 	if runtime.friendly[key] == nil and runtime.hostile[key] == nil then
@@ -2845,7 +3041,7 @@ local function CreateButton(parent, name, text, x, y)
 	local button = parent:CreateChildWidget("button", name, 0, true)
 	button:SetStyle("text_default")
 	button:SetText(text)
-	button:SetExtent(BUTTON_WIDTH, BUTTON_HEIGHT)
+	button:SetExtent(ui.BUTTON_WIDTH, ui.BUTTON_HEIGHT)
 	button:AddAnchor("TOPLEFT", parent, x, y)
 	return button
 end
@@ -2884,7 +3080,7 @@ local function PollNoteEditBox(dt)
 	end
 
 	runtime.editboxPollElapsed = runtime.editboxPollElapsed + NormalizeDt(dt)
-	if runtime.editboxPollElapsed < EDITBOX_POLL_SECONDS then
+	if runtime.editboxPollElapsed < timing.EDITBOX_POLL_SECONDS then
 		return
 	end
 	runtime.editboxPollElapsed = 0
@@ -2914,10 +3110,10 @@ local function CreateNoteInput(window)
 	local state = CreateTrackedEditBox(
 		window,
 		"dpsBasicsUnitTrackerNoteInput",
-		NOTE_INPUT_LEFT,
-		NOTE_INPUT_TOP,
-		NOTE_INPUT_WIDTH,
-		NOTE_INPUT_HEIGHT,
+		ui.NOTE_INPUT_LEFT,
+		ui.NOTE_INPUT_TOP,
+		ui.NOTE_INPUT_WIDTH,
+		ui.NOTE_INPUT_HEIGHT,
 		240,
 		"Player note",
 		function(text)
@@ -2935,10 +3131,10 @@ local function CreateNoteWindow()
 		return runtime.noteWindow
 	end
 
-	local noteX, noteY = LoadPosition(NOTE_POSITION_KEY, 760, 420, LEGACY_NOTE_POSITION_KEY)
+	local noteX, noteY = LoadPosition(persist.NOTE_POSITION_KEY, 760, 420, persist.LEGACY_NOTE_POSITION_KEY)
 	local noteWindow = CreateEmptyWindow("dpsBasicsUnitTrackerNoteWindow", "UIParent")
 	runtime.noteWindow = noteWindow
-	noteWindow:SetExtent(NOTE_WINDOW_WIDTH, NOTE_WINDOW_HEIGHT)
+	noteWindow:SetExtent(ui.NOTE_WINDOW_WIDTH, ui.NOTE_WINDOW_HEIGHT)
 	noteWindow:AddAnchor("TOPLEFT", "UIParent", noteX, noteY)
 	noteWindow:EnableDrag(true)
 	noteWindow:Clickable(true)
@@ -2952,9 +3148,9 @@ local function CreateNoteWindow()
 		noteWindow,
 		"dpsBasicsUnitTrackerNoteTitle",
 		"Player Note",
-		NOTE_WINDOW_WIDTH - 44,
+		ui.NOTE_WINDOW_WIDTH - 44,
 		22,
-		PADDING,
+		ui.PADDING,
 		6,
 		11,
 		{ 0.95, 0.92, 0.82, 1 }
@@ -2968,14 +3164,14 @@ local function CreateNoteWindow()
 	noteWindow.closeButton:AddAnchor("TOPRIGHT", noteWindow, -6, 6)
 
 	CreateNoteInput(noteWindow)
-	local dateY = NOTE_INPUT_TOP + NOTE_INPUT_HEIGHT + 2
+	local dateY = ui.NOTE_INPUT_TOP + ui.NOTE_INPUT_HEIGHT + 2
 	noteWindow.dateLabel = CreateLabel(
 		noteWindow,
 		"dpsBasicsUnitTrackerNoteDate",
 		"",
-		NOTE_INPUT_WIDTH,
-		NOTE_DATE_LABEL_HEIGHT,
-		NOTE_INPUT_LEFT,
+		ui.NOTE_INPUT_WIDTH,
+		ui.NOTE_DATE_LABEL_HEIGHT,
+		ui.NOTE_INPUT_LEFT,
 		dateY,
 		10,
 		{ 0.72, 0.86, 1, 1 }
@@ -2984,15 +3180,15 @@ local function CreateNoteWindow()
 		noteWindow.dateLabel.style:SetAlign(ALIGN_LEFT)
 	end
 
-	local actionY = dateY + NOTE_DATE_LABEL_HEIGHT + NOTE_AFTER_DATE_GAP
-	local mapButtonX = NOTE_WINDOW_WIDTH - PADDING - BUTTON_WIDTH - BUTTON_GAP - runtime.map.BUTTON_SIZE
+	local actionY = dateY + ui.NOTE_DATE_LABEL_HEIGHT + ui.NOTE_AFTER_DATE_GAP
+	local mapButtonX = ui.NOTE_WINDOW_WIDTH - ui.PADDING - ui.BUTTON_WIDTH - ui.BUTTON_GAP - runtime.map.BUTTON_SIZE
 	noteWindow.statusLabel = CreateLabel(
 		noteWindow,
 		"dpsBasicsUnitTrackerNoteStatus",
 		"",
-		mapButtonX - PADDING - 4,
+		mapButtonX - ui.PADDING - 4,
 		18,
-		PADDING,
+		ui.PADDING,
 		actionY + 4,
 		10,
 		{ 0.72, 0.86, 1, 1 }
@@ -3011,7 +3207,7 @@ local function CreateNoteWindow()
 		noteWindow,
 		"dpsBasicsUnitTrackerNoteSaveButton",
 		"Save",
-		NOTE_WINDOW_WIDTH - PADDING - BUTTON_WIDTH,
+		ui.NOTE_WINDOW_WIDTH - ui.PADDING - ui.BUTTON_WIDTH,
 		actionY
 	)
 
@@ -3099,9 +3295,9 @@ local function EnsureViewRow(listName, index)
 		viewWindow,
 		"dpsBasicsUnitTrackerView" .. listName .. "Name" .. tostring(index),
 		"",
-		VIEW_WINDOW_WIDTH - (PADDING * 2) - VIEW_ROW_ACTION_WIDTH - 4,
+		ui.VIEW_WINDOW_WIDTH - (ui.PADDING * 2) - ui.VIEW_ROW_ACTION_WIDTH - 4,
 		20,
-		PADDING,
+		ui.PADDING,
 		0,
 		11,
 		{ 0.9, 0.9, 0.9, 1 }
@@ -3115,6 +3311,20 @@ local function EnsureViewRow(listName, index)
 	end
 	row.nameLabel:SetHandler("OnClick", row.nameLabel.OnClick)
 
+	-- Separate label so guild text can stay blue while the name keeps list color.
+	row.guildLabel = CreateLabel(
+		viewWindow,
+		"dpsBasicsUnitTrackerView" .. listName .. "Guild" .. tostring(index),
+		"",
+		40,
+		20,
+		ui.PADDING,
+		0,
+		11,
+		LIST_COLORS.guild
+	)
+	row.guildLabel:Show(false)
+
 	row.removeButton = viewWindow:CreateChildWidget(
 		"button",
 		"dpsBasicsUnitTrackerView" .. listName .. "Remove" .. tostring(index),
@@ -3123,7 +3333,7 @@ local function EnsureViewRow(listName, index)
 	)
 	row.removeButton:SetStyle("text_default")
 	row.removeButton:SetText("X")
-	row.removeButton:SetExtent(VIEW_REMOVE_BUTTON_WIDTH, 20)
+	row.removeButton:SetExtent(ui.VIEW_REMOVE_BUTTON_WIDTH, 20)
 
 	function row.removeButton:OnClick()
 		BeginRemoveConfirm(self.listName, self.entryKey)
@@ -3138,7 +3348,7 @@ local function EnsureViewRow(listName, index)
 	)
 	row.confirmNoButton:SetStyle("text_default")
 	row.confirmNoButton:SetText("N")
-	row.confirmNoButton:SetExtent(VIEW_CONFIRM_BUTTON_WIDTH, 20)
+	row.confirmNoButton:SetExtent(ui.VIEW_CONFIRM_BUTTON_WIDTH, 20)
 
 	function row.confirmNoButton:OnClick()
 		ClearRemoveConfirm()
@@ -3153,7 +3363,7 @@ local function EnsureViewRow(listName, index)
 	)
 	row.confirmYesButton:SetStyle("text_default")
 	row.confirmYesButton:SetText("Y")
-	row.confirmYesButton:SetExtent(VIEW_CONFIRM_BUTTON_WIDTH, 20)
+	row.confirmYesButton:SetExtent(ui.VIEW_CONFIRM_BUTTON_WIDTH, 20)
 
 	function row.confirmYesButton:OnClick()
 		RemoveNameFromList(self.listName, self.entryKey)
@@ -3164,35 +3374,114 @@ local function EnsureViewRow(listName, index)
 	return row
 end
 
-local function PositionViewRow(row, listName, key, name, y, color)
+local function PositionViewRow(row, listName, key, name, guild, y, color)
 	local confirming = IsRemoveConfirmPending(listName, key)
-	local nameWidth = VIEW_WINDOW_WIDTH - (PADDING * 2) - VIEW_ROW_ACTION_WIDTH - 4
+	-- Text area left of the remove/confirm buttons.
+	local maxRowWidth = ui.VIEW_WINDOW_WIDTH - (ui.PADDING * 2) - ui.VIEW_ROW_ACTION_WIDTH - 4
+	name = tostring(name or "")
+	guild = Trim(tostring(guild or ""))
+
+	local displayName = name
+	local guildText = ""
+	local nameShare = maxRowWidth
+	local guildShare = 0
+
+	if guild == "" then
+		displayName = FitTextToLabelWidth(row.nameLabel, name, maxRowWidth - 2)
+		nameShare = EstimateLabelPaintWidth(row.nameLabel, displayName)
+		if nameShare > maxRowWidth then
+			nameShare = maxRowWidth
+		end
+		if nameShare < 1 then
+			nameShare = 1
+		end
+	else
+		guildText = " - " .. guild
+		local naturalNameWidth = EstimateLabelPaintWidth(row.nameLabel, name)
+		local naturalGuildWidth = EstimateLabelPaintWidth(row.guildLabel, guildText)
+
+		if naturalNameWidth + naturalGuildWidth <= maxRowWidth then
+			-- Guild sits immediately after the name; only use the width each needs.
+			nameShare = naturalNameWidth
+			guildShare = naturalGuildWidth
+		else
+			-- Not enough room for both: truncate both, sharing width by natural size.
+			nameShare = math.floor(maxRowWidth * naturalNameWidth / (naturalNameWidth + naturalGuildWidth))
+			guildShare = maxRowWidth - nameShare
+			local minShare = 40
+			if maxRowWidth > (minShare * 2) then
+				if nameShare < minShare then
+					nameShare = minShare
+					guildShare = maxRowWidth - nameShare
+				elseif guildShare < minShare then
+					guildShare = minShare
+					nameShare = maxRowWidth - guildShare
+				end
+			end
+		end
+
+		-- Fit into budgets with the same paint estimator used for placement.
+		displayName = FitTextToLabelWidth(row.nameLabel, name, nameShare)
+		guildText = FitTextToLabelWidth(row.guildLabel, guildText, guildShare)
+		-- Re-measure truncated name so guild starts at the end of what will paint.
+		nameShare = EstimateLabelPaintWidth(row.nameLabel, displayName)
+		guildShare = EstimateLabelPaintWidth(row.guildLabel, guildText)
+		if nameShare + guildShare > maxRowWidth then
+			local scale = maxRowWidth / (nameShare + guildShare)
+			nameShare = math.floor(nameShare * scale)
+			guildShare = maxRowWidth - nameShare
+			displayName = FitTextToLabelWidth(row.nameLabel, name, nameShare)
+			guildText = FitTextToLabelWidth(row.guildLabel, " - " .. guild, guildShare)
+			nameShare = EstimateLabelPaintWidth(row.nameLabel, displayName)
+			if nameShare + guildShare > maxRowWidth then
+				nameShare = maxRowWidth - guildShare
+			end
+		end
+		if nameShare < 1 then
+			nameShare = 1
+		end
+		if guildShare < 1 then
+			guildShare = 1
+		end
+	end
 
 	row.nameLabel.entryKey = key
-	row.nameLabel:SetText(name)
+	row.nameLabel:SetText(displayName)
 	row.nameLabel:RemoveAllAnchors()
-	row.nameLabel:AddAnchor("TOPLEFT", runtime.viewWindow, PADDING, y + 2)
-	row.nameLabel:SetExtent(nameWidth, 20)
+	row.nameLabel:AddAnchor("TOPLEFT", runtime.viewWindow, ui.PADDING, y + 2)
+	row.nameLabel:SetExtent(nameShare, 20)
 	SetLabelColor(row.nameLabel, color)
 	row.nameLabel:Show(true)
+
+	if guildText ~= "" and row.guildLabel ~= nil then
+		row.guildLabel:SetText(guildText)
+		row.guildLabel:RemoveAllAnchors()
+		row.guildLabel:AddAnchor("TOPLEFT", runtime.viewWindow, ui.PADDING + nameShare, y + 2)
+		row.guildLabel:SetExtent(guildShare, 20)
+		SetLabelColor(row.guildLabel, LIST_COLORS.guild)
+		row.guildLabel:Show(true)
+	elseif row.guildLabel ~= nil then
+		row.guildLabel:SetText("")
+		row.guildLabel:Show(false)
+	end
 
 	row.removeButton.listName = listName
 	row.removeButton.entryKey = key
 	row.removeButton:RemoveAllAnchors()
-	row.removeButton:AddAnchor("TOPRIGHT", runtime.viewWindow, -PADDING, y)
+	row.removeButton:AddAnchor("TOPRIGHT", runtime.viewWindow, -ui.PADDING, y)
 	row.removeButton:Show(not confirming)
 
 	row.confirmYesButton.listName = listName
 	row.confirmYesButton.entryKey = key
 	row.confirmYesButton:RemoveAllAnchors()
-	row.confirmYesButton:AddAnchor("TOPRIGHT", runtime.viewWindow, -PADDING, y)
+	row.confirmYesButton:AddAnchor("TOPRIGHT", runtime.viewWindow, -ui.PADDING, y)
 	row.confirmYesButton:Show(confirming)
 
 	row.confirmNoButton:RemoveAllAnchors()
 	row.confirmNoButton:AddAnchor(
 		"TOPRIGHT",
 		runtime.viewWindow,
-		-(PADDING + VIEW_CONFIRM_BUTTON_WIDTH + VIEW_CONFIRM_GAP),
+		-(ui.PADDING + ui.VIEW_CONFIRM_BUTTON_WIDTH + ui.VIEW_CONFIRM_GAP),
 		y
 	)
 	row.confirmNoButton:Show(confirming)
@@ -3202,6 +3491,7 @@ local function HideUnusedViewRows(listName, firstUnusedIndex)
 	local rows = runtime.viewRows[listName]
 	for index = firstUnusedIndex, #rows do
 		SetWidgetVisible(rows[index].nameLabel, false)
+		SetWidgetVisible(rows[index].guildLabel, false)
 		SetWidgetVisible(rows[index].removeButton, false)
 		SetWidgetVisible(rows[index].confirmNoButton, false)
 		SetWidgetVisible(rows[index].confirmYesButton, false)
@@ -3213,7 +3503,7 @@ local function GetTotalPagesForCount(count)
 	if count <= 0 then
 		return 1
 	end
-	return math.ceil(count / VIEW_ROWS_PER_PAGE)
+	return math.ceil(count / ui.VIEW_ROWS_PER_PAGE)
 end
 
 local function GetSectionPage(listName)
@@ -3264,18 +3554,18 @@ local function PositionSectionPagination(pagination, y)
 	end
 
 	local viewWindow = runtime.viewWindow
-	local rightInset = PADDING
+	local rightInset = ui.PADDING
 
 	pagination.nextButton:RemoveAllAnchors()
 	pagination.nextButton:AddAnchor("TOPRIGHT", viewWindow, -rightInset, y)
 	pagination.nextButton:Show(true)
 
-	rightInset = rightInset + PAGE_BUTTON_WIDTH + 2
+	rightInset = rightInset + ui.PAGE_BUTTON_WIDTH + 2
 	pagination.pageLabel:RemoveAllAnchors()
 	pagination.pageLabel:AddAnchor("TOPRIGHT", viewWindow, -rightInset, y + 1)
 	pagination.pageLabel:Show(true)
 
-	rightInset = rightInset + PAGE_LABEL_WIDTH + 2
+	rightInset = rightInset + ui.PAGE_LABEL_WIDTH + 2
 	pagination.prevButton:RemoveAllAnchors()
 	pagination.prevButton:AddAnchor("TOPRIGHT", viewWindow, -rightInset, y)
 	pagination.prevButton:Show(true)
@@ -3299,13 +3589,13 @@ local function CreateSectionPagination(viewWindow, listName, prefix)
 	pagination.prevButton = viewWindow:CreateChildWidget("button", prefix .. "PrevButton", 0, true)
 	pagination.prevButton:SetStyle("text_default")
 	pagination.prevButton:SetText("<")
-	pagination.prevButton:SetExtent(PAGE_BUTTON_WIDTH, PAGE_BUTTON_HEIGHT)
+	pagination.prevButton:SetExtent(ui.PAGE_BUTTON_WIDTH, ui.PAGE_BUTTON_HEIGHT)
 
 	pagination.pageLabel = CreateLabel(
 		viewWindow,
 		prefix .. "PageLabel",
 		"1/1",
-		PAGE_LABEL_WIDTH,
+		ui.PAGE_LABEL_WIDTH,
 		18,
 		0,
 		0,
@@ -3317,7 +3607,7 @@ local function CreateSectionPagination(viewWindow, listName, prefix)
 	pagination.nextButton = viewWindow:CreateChildWidget("button", prefix .. "NextButton", 0, true)
 	pagination.nextButton:SetStyle("text_default")
 	pagination.nextButton:SetText(">")
-	pagination.nextButton:SetExtent(PAGE_BUTTON_WIDTH, PAGE_BUTTON_HEIGHT)
+	pagination.nextButton:SetExtent(ui.PAGE_BUTTON_WIDTH, ui.PAGE_BUTTON_HEIGHT)
 
 	-- Pager acts on whichever tab is active; total pages reflect the filtered list.
 	function pagination.prevButton:OnClick()
@@ -3514,7 +3804,7 @@ UpdateViewWindow = function()
 	local count = #keys
 	local page, totalPages = ClampSectionPage(listName, count)
 	runtime.viewTotalPages = totalPages
-	local pageStart = ((page - 1) * VIEW_ROWS_PER_PAGE) + 1
+	local pageStart = ((page - 1) * ui.VIEW_ROWS_PER_PAGE) + 1
 
 	listView.RefreshChrome()
 
@@ -3530,13 +3820,21 @@ UpdateViewWindow = function()
 	UpdateSectionPagination(viewWindow.pagination, page, totalPages)
 
 	local visibleIndex = 1
-	for slot = 1, VIEW_ROWS_PER_PAGE do
+	for slot = 1, ui.VIEW_ROWS_PER_PAGE do
 		local keyIndex = pageStart + slot - 1
-		local rowY = listView.ROWS_TOP + ((slot - 1) * VIEW_ROW_HEIGHT)
+		local rowY = listView.ROWS_TOP + ((slot - 1) * ui.VIEW_ROW_HEIGHT)
 		if keyIndex <= count then
 			local key = keys[keyIndex]
 			local row = EnsureViewRow(listName, visibleIndex)
-			PositionViewRow(row, listName, key, GetEntryName(list[key]), rowY, color)
+			PositionViewRow(
+				row,
+				listName,
+				key,
+				GetEntryName(list[key]),
+				GetEntryGuild(list[key]),
+				rowY,
+				color
+			)
 			visibleIndex = visibleIndex + 1
 		end
 	end
@@ -3545,7 +3843,7 @@ UpdateViewWindow = function()
 	-- Keep the inactive list's row pool fully hidden.
 	HideUnusedViewRows(listName == "friendly" and "hostile" or "friendly", 1)
 
-	viewWindow:SetExtent(VIEW_WINDOW_WIDTH, VIEW_HEIGHT)
+	viewWindow:SetExtent(ui.VIEW_WINDOW_WIDTH, ui.VIEW_HEIGHT)
 end
 
 local function CreateViewWindow()
@@ -3553,10 +3851,10 @@ local function CreateViewWindow()
 		return runtime.viewWindow
 	end
 
-	local viewX, viewY = LoadPosition(VIEW_POSITION_KEY, 710, 360, LEGACY_VIEW_POSITION_KEY)
+	local viewX, viewY = LoadPosition(persist.VIEW_POSITION_KEY, 710, 360, persist.LEGACY_VIEW_POSITION_KEY)
 	local viewWindow = CreateEmptyWindow("dpsBasicsUnitTrackerViewWindow", "UIParent")
 	runtime.viewWindow = viewWindow
-	viewWindow:SetExtent(VIEW_WINDOW_WIDTH, VIEW_HEIGHT)
+	viewWindow:SetExtent(ui.VIEW_WINDOW_WIDTH, ui.VIEW_HEIGHT)
 	viewWindow:AddAnchor("TOPLEFT", "UIParent", viewX, viewY)
 	viewWindow:EnableDrag(true)
 	viewWindow:Clickable(true)
@@ -3570,9 +3868,9 @@ local function CreateViewWindow()
 		viewWindow,
 		"dpsBasicsUnitTrackerViewTitle",
 		"Unit Lists",
-		VIEW_WINDOW_WIDTH - 58,
+		ui.VIEW_WINDOW_WIDTH - 58,
 		22,
-		PADDING,
+		ui.PADDING,
 		8,
 		13,
 		{ 0.95, 0.92, 0.82, 1 }
@@ -3583,14 +3881,14 @@ local function CreateViewWindow()
 	viewWindow.closeButton:SetStyle("text_default")
 	viewWindow.closeButton:SetText("X")
 	viewWindow.closeButton:SetExtent(30, 20)
-	viewWindow.closeButton:AddAnchor("TOPRIGHT", viewWindow, -PADDING, 8)
+	viewWindow.closeButton:AddAnchor("TOPRIGHT", viewWindow, -ui.PADDING, 8)
 
 	-- Tab buttons switch which list is shown (only one list visible at a time).
 	viewWindow.friendlyTab = viewWindow:CreateChildWidget("button", "dpsBasicsUnitTrackerViewFriendlyTab", 0, true)
 	viewWindow.friendlyTab:SetStyle("text_default")
 	viewWindow.friendlyTab:SetText("Friendly")
 	viewWindow.friendlyTab:SetExtent(126, listView.TAB_HEIGHT)
-	viewWindow.friendlyTab:AddAnchor("TOPLEFT", viewWindow, PADDING, listView.TAB_Y)
+	viewWindow.friendlyTab:AddAnchor("TOPLEFT", viewWindow, ui.PADDING, listView.TAB_Y)
 	function viewWindow.friendlyTab:OnClick()
 		listView.SetTab("friendly")
 		UpdateViewWindow()
@@ -3601,7 +3899,7 @@ local function CreateViewWindow()
 	viewWindow.hostileTab:SetStyle("text_default")
 	viewWindow.hostileTab:SetText("Hostile")
 	viewWindow.hostileTab:SetExtent(126, listView.TAB_HEIGHT)
-	viewWindow.hostileTab:AddAnchor("TOPLEFT", viewWindow, PADDING + 132, listView.TAB_Y)
+	viewWindow.hostileTab:AddAnchor("TOPLEFT", viewWindow, ui.PADDING + 132, listView.TAB_Y)
 	function viewWindow.hostileTab:OnClick()
 		listView.SetTab("hostile")
 		UpdateViewWindow()
@@ -3617,9 +3915,9 @@ local function CreateViewWindow()
 	viewWindow.filterState = CreateTrackedEditBox(
 		viewWindow,
 		"dpsBasicsUnitTrackerViewFilter",
-		PADDING,
+		ui.PADDING,
 		listView.FILTER_Y,
-		VIEW_WINDOW_WIDTH - (PADDING * 2) - 98,
+		ui.VIEW_WINDOW_WIDTH - (ui.PADDING * 2) - 98,
 		listView.FILTER_HEIGHT,
 		40,
 		"Filter names...",
@@ -3632,7 +3930,7 @@ local function CreateViewWindow()
 	viewWindow.sortButton:SetStyle("text_default")
 	viewWindow.sortButton:SetText(listView.SortButtonText())
 	viewWindow.sortButton:SetExtent(92, listView.FILTER_HEIGHT)
-	viewWindow.sortButton:AddAnchor("TOPRIGHT", viewWindow, -PADDING, listView.FILTER_Y)
+	viewWindow.sortButton:AddAnchor("TOPRIGHT", viewWindow, -ui.PADDING, listView.FILTER_Y)
 	function viewWindow.sortButton:OnClick()
 		listView.CycleSort()
 		UpdateViewWindow()
@@ -3644,9 +3942,9 @@ local function CreateViewWindow()
 		viewWindow,
 		"dpsBasicsUnitTrackerViewListHeader",
 		"",
-		VIEW_WINDOW_WIDTH - 120,
+		ui.VIEW_WINDOW_WIDTH - 120,
 		20,
-		PADDING,
+		ui.PADDING,
 		listView.HEADER_Y,
 		12,
 		{ 0.9, 0.9, 0.9, 1 }
@@ -3659,7 +3957,7 @@ local function CreateViewWindow()
 		end
 		-- Poll the filter box; some editbox widgets do not fire OnTextChanged.
 		runtime.viewPollElapsed = (runtime.viewPollElapsed or 0) + NormalizeDt(dt)
-		if runtime.viewPollElapsed < EDITBOX_POLL_SECONDS then
+		if runtime.viewPollElapsed < timing.EDITBOX_POLL_SECONDS then
 			return
 		end
 		runtime.viewPollElapsed = 0
@@ -3710,10 +4008,10 @@ local function CreateOptsWindow()
 		return runtime.optsWindow
 	end
 
-	local optsX, optsY = LoadPosition(OPTS_POSITION_KEY, 520, 360)
+	local optsX, optsY = LoadPosition(persist.OPTS_POSITION_KEY, 520, 360)
 	local optsWindow = CreateEmptyWindow("dpsBasicsUnitTrackerOptsWindow", "UIParent")
 	runtime.optsWindow = optsWindow
-	optsWindow:SetExtent(OPTS_WINDOW_WIDTH, OPTS_WINDOW_HEIGHT)
+	optsWindow:SetExtent(ui.OPTS_WINDOW_WIDTH, ui.OPTS_WINDOW_HEIGHT)
 	optsWindow:AddAnchor("TOPLEFT", "UIParent", optsX, optsY)
 	optsWindow:EnableDrag(true)
 	optsWindow:Clickable(true)
@@ -3727,9 +4025,9 @@ local function CreateOptsWindow()
 		optsWindow,
 		"dpsBasicsUnitTrackerOptsTitle",
 		"Opts",
-		OPTS_WINDOW_WIDTH - 58,
+		ui.OPTS_WINDOW_WIDTH - 58,
 		22,
-		PADDING,
+		ui.PADDING,
 		8,
 		13,
 		{ 0.95, 0.92, 0.82, 1 }
@@ -3740,41 +4038,41 @@ local function CreateOptsWindow()
 	optsWindow.closeButton:SetStyle("text_default")
 	optsWindow.closeButton:SetText("X")
 	optsWindow.closeButton:SetExtent(30, 20)
-	optsWindow.closeButton:AddAnchor("TOPRIGHT", optsWindow, -PADDING, 8)
+	optsWindow.closeButton:AddAnchor("TOPRIGHT", optsWindow, -ui.PADDING, 8)
 
 	local buttonY = 38
-	local fullButtonWidth = OPTS_WINDOW_WIDTH - (PADDING * 2)
+	local fullButtonWidth = ui.OPTS_WINDOW_WIDTH - (ui.PADDING * 2)
 
 	optsWindow.viewListButton = CreateButton(
 		optsWindow,
 		"dpsBasicsUnitTrackerOptsViewListButton",
 		"View List",
-		PADDING,
+		ui.PADDING,
 		buttonY
 	)
-	optsWindow.viewListButton:SetExtent(fullButtonWidth, BUTTON_HEIGHT)
-	buttonY = buttonY + BUTTON_HEIGHT + BUTTON_GAP
+	optsWindow.viewListButton:SetExtent(fullButtonWidth, ui.BUTTON_HEIGHT)
+	buttonY = buttonY + ui.BUTTON_HEIGHT + ui.BUTTON_GAP
 
 	optsWindow.exportButton = CreateButton(
 		optsWindow,
 		"dpsBasicsUnitTrackerOptsExportButton",
 		"Export",
-		PADDING,
+		ui.PADDING,
 		buttonY
 	)
-	optsWindow.exportButton:SetExtent(fullButtonWidth, BUTTON_HEIGHT)
-	buttonY = buttonY + BUTTON_HEIGHT + BUTTON_GAP
+	optsWindow.exportButton:SetExtent(fullButtonWidth, ui.BUTTON_HEIGHT)
+	buttonY = buttonY + ui.BUTTON_HEIGHT + ui.BUTTON_GAP
 
-	local hotkeyButtonWidth = fullButtonWidth - VIEW_REMOVE_BUTTON_WIDTH - VIEW_CONFIRM_GAP
+	local hotkeyButtonWidth = fullButtonWidth - ui.VIEW_REMOVE_BUTTON_WIDTH - ui.VIEW_CONFIRM_GAP
 
 	optsWindow.friendlyHotkeyButton = CreateButton(
 		optsWindow,
 		"dpsBasicsUnitTrackerOptsFriendlyHotkeyButton",
 		hotkeys.ButtonLabel("friendly"),
-		PADDING,
+		ui.PADDING,
 		buttonY
 	)
-	optsWindow.friendlyHotkeyButton:SetExtent(hotkeyButtonWidth, BUTTON_HEIGHT)
+	optsWindow.friendlyHotkeyButton:SetExtent(hotkeyButtonWidth, ui.BUTTON_HEIGHT)
 	SetButtonTextColor(optsWindow.friendlyHotkeyButton, LIST_COLORS.friendly)
 
 	optsWindow.friendlyHotkeyClearButton = optsWindow:CreateChildWidget(
@@ -3785,18 +4083,18 @@ local function CreateOptsWindow()
 	)
 	optsWindow.friendlyHotkeyClearButton:SetStyle("text_default")
 	optsWindow.friendlyHotkeyClearButton:SetText("X")
-	optsWindow.friendlyHotkeyClearButton:SetExtent(VIEW_REMOVE_BUTTON_WIDTH, BUTTON_HEIGHT)
-	optsWindow.friendlyHotkeyClearButton:AddAnchor("TOPRIGHT", optsWindow, -PADDING, buttonY)
-	buttonY = buttonY + BUTTON_HEIGHT + BUTTON_GAP
+	optsWindow.friendlyHotkeyClearButton:SetExtent(ui.VIEW_REMOVE_BUTTON_WIDTH, ui.BUTTON_HEIGHT)
+	optsWindow.friendlyHotkeyClearButton:AddAnchor("TOPRIGHT", optsWindow, -ui.PADDING, buttonY)
+	buttonY = buttonY + ui.BUTTON_HEIGHT + ui.BUTTON_GAP
 
 	optsWindow.hostileHotkeyButton = CreateButton(
 		optsWindow,
 		"dpsBasicsUnitTrackerOptsHostileHotkeyButton",
 		hotkeys.ButtonLabel("hostile"),
-		PADDING,
+		ui.PADDING,
 		buttonY
 	)
-	optsWindow.hostileHotkeyButton:SetExtent(hotkeyButtonWidth, BUTTON_HEIGHT)
+	optsWindow.hostileHotkeyButton:SetExtent(hotkeyButtonWidth, ui.BUTTON_HEIGHT)
 	SetButtonTextColor(optsWindow.hostileHotkeyButton, LIST_COLORS.hostile)
 
 	optsWindow.hostileHotkeyClearButton = optsWindow:CreateChildWidget(
@@ -3807,8 +4105,8 @@ local function CreateOptsWindow()
 	)
 	optsWindow.hostileHotkeyClearButton:SetStyle("text_default")
 	optsWindow.hostileHotkeyClearButton:SetText("X")
-	optsWindow.hostileHotkeyClearButton:SetExtent(VIEW_REMOVE_BUTTON_WIDTH, BUTTON_HEIGHT)
-	optsWindow.hostileHotkeyClearButton:AddAnchor("TOPRIGHT", optsWindow, -PADDING, buttonY)
+	optsWindow.hostileHotkeyClearButton:SetExtent(ui.VIEW_REMOVE_BUTTON_WIDTH, ui.BUTTON_HEIGHT)
+	optsWindow.hostileHotkeyClearButton:AddAnchor("TOPRIGHT", optsWindow, -ui.PADDING, buttonY)
 
 	-- Focus target for capturing the next key press while assigning bindings.
 	local captureInput = optsWindow:CreateChildWidgetByType(
@@ -3817,7 +4115,7 @@ local function CreateOptsWindow()
 		0,
 		true
 	)
-	captureInput:AddAnchor("TOPLEFT", optsWindow, PADDING, OPTS_WINDOW_HEIGHT - 2)
+	captureInput:AddAnchor("TOPLEFT", optsWindow, ui.PADDING, ui.OPTS_WINDOW_HEIGHT - 2)
 	captureInput:SetExtent(1, 1)
 	SafeCall(captureInput, "SetMaxTextLength", 1)
 	SafeCall(captureInput, "Show", true)
@@ -3930,6 +4228,10 @@ local function HideTrackerWindow()
 	if runtime.noteWindow ~= nil then
 		runtime.noteWindow:Show(false)
 	end
+	if runtime.exportNotifyWindow ~= nil then
+		runtime.exportNotifyWindow:Show(false)
+	end
+	runtime.exportNotifyHideAt = 0
 end
 
 local function ShowTrackerWindow()
@@ -3940,11 +4242,14 @@ local function ShowTrackerWindow()
 end
 
 local function OpenTrackerWindowForIncomingDamage()
+	if runtime.loading then
+		return
+	end
 	if runtime.window == nil or runtime.window:IsVisible() then
 		return
 	end
 	local now = Now()
-	if now - (tonumber(runtime.lastAutoOpenTime) or 0) < AUTO_OPEN_COOLDOWN_SECONDS then
+	if now - (tonumber(runtime.lastAutoOpenTime) or 0) < timing.AUTO_OPEN_COOLDOWN_SECONDS then
 		return
 	end
 	runtime.lastAutoOpenTime = now
@@ -3954,10 +4259,13 @@ end
 local function HandleCombatTextMessage(...)
 	-- Auto-open is the only consumer of COMBAT_TEXT, so skip all work (including the
 	-- message-table allocation) whenever an auto-open could not happen anyway.
+	if runtime.loading then
+		return
+	end
 	if runtime.window == nil or runtime.window:IsVisible() then
 		return
 	end
-	if Now() - (tonumber(runtime.lastAutoOpenTime) or 0) < AUTO_OPEN_COOLDOWN_SECONDS then
+	if Now() - (tonumber(runtime.lastAutoOpenTime) or 0) < timing.AUTO_OPEN_COOLDOWN_SECONDS then
 		return
 	end
 
@@ -4000,10 +4308,10 @@ local function CreateTrackerWindow()
 		return runtime.window
 	end
 
-	local windowX, windowY = LoadPosition(POSITION_KEY, 460, 360, LEGACY_POSITION_KEY)
+	local windowX, windowY = LoadPosition(persist.POSITION_KEY, 460, 360, persist.LEGACY_POSITION_KEY)
 	local window = CreateEmptyWindow("dpsBasicsUnitTrackerWindow", "UIParent")
 	runtime.window = window
-	window:SetExtent(WINDOW_WIDTH, WINDOW_HEIGHT)
+	window:SetExtent(ui.WINDOW_WIDTH, ui.WINDOW_HEIGHT)
 	window:AddAnchor("TOPLEFT", "UIParent", windowX, windowY)
 	window:EnableDrag(true)
 	window:Clickable(true)
@@ -4013,7 +4321,7 @@ local function CreateTrackerWindow()
 	background:AddAnchor("TOPLEFT", window, 0, 0)
 	background:AddAnchor("BOTTOMRIGHT", window, 0, 0)
 
-	window.titleLabel = CreateLabel(window, "dpsBasicsUnitTrackerTitle", "Unit Tracker", WINDOW_WIDTH - 58, 22, PADDING, 8, 13, {
+	window.titleLabel = CreateLabel(window, "dpsBasicsUnitTrackerTitle", "Unit Tracker", ui.WINDOW_WIDTH - 58, 22, ui.PADDING, 8, 13, {
 		0.95,
 		0.92,
 		0.82,
@@ -4025,7 +4333,7 @@ local function CreateTrackerWindow()
 	window.closeButton:SetStyle("text_default")
 	window.closeButton:SetText("X")
 	window.closeButton:SetExtent(30, 20)
-	window.closeButton:AddAnchor("TOPRIGHT", window, -PADDING, 8)
+	window.closeButton:AddAnchor("TOPRIGHT", window, -ui.PADDING, 8)
 
 	local function BindNotePreviewClick(label)
 		SafeCall(label, "Clickable", true)
@@ -4048,10 +4356,10 @@ local function CreateTrackerWindow()
 		window,
 		"dpsBasicsUnitTrackerNoteLine1",
 		"",
-		NOTE_PREVIEW_WIDTH,
-		NOTE_PREVIEW_LINE_HEIGHT,
-		PADDING,
-		NOTE_PREVIEW_TOP,
+		ui.NOTE_PREVIEW_WIDTH,
+		ui.NOTE_PREVIEW_LINE_HEIGHT,
+		ui.PADDING,
+		ui.NOTE_PREVIEW_TOP,
 		11,
 		{ 0.9, 0.9, 0.9, 1 }
 	)
@@ -4059,10 +4367,10 @@ local function CreateTrackerWindow()
 		window,
 		"dpsBasicsUnitTrackerNoteLine2",
 		"",
-		NOTE_PREVIEW_WIDTH,
-		NOTE_PREVIEW_LINE_HEIGHT,
-		PADDING,
-		NOTE_PREVIEW_TOP + NOTE_PREVIEW_LINE_HEIGHT,
+		ui.NOTE_PREVIEW_WIDTH,
+		ui.NOTE_PREVIEW_LINE_HEIGHT,
+		ui.PADDING,
+		ui.NOTE_PREVIEW_TOP + ui.NOTE_PREVIEW_LINE_HEIGHT,
 		11,
 		{ 0.9, 0.9, 0.9, 1 }
 	)
@@ -4073,13 +4381,13 @@ local function CreateTrackerWindow()
 	BindNotePreviewClick(window.noteLine1)
 	BindNotePreviewClick(window.noteLine2)
 
-	window.friendlyButton = CreateButton(window, "dpsBasicsUnitTrackerFriendlyButton", "Friendly", PADDING, 78)
+	window.friendlyButton = CreateButton(window, "dpsBasicsUnitTrackerFriendlyButton", "Friendly", ui.PADDING, 78)
 	SetButtonTextColor(window.friendlyButton, LIST_COLORS.friendly)
 	window.hostileButton = CreateButton(
 		window,
 		"dpsBasicsUnitTrackerHostileButton",
 		"Hostile",
-		PADDING + BUTTON_WIDTH + BUTTON_GAP,
+		ui.PADDING + ui.BUTTON_WIDTH + ui.BUTTON_GAP,
 		78
 	)
 	SetButtonTextColor(window.hostileButton, LIST_COLORS.hostile)
@@ -4087,7 +4395,7 @@ local function CreateTrackerWindow()
 		window,
 		"dpsBasicsUnitTrackerOptsButton",
 		"Opts",
-		PADDING + ((BUTTON_WIDTH + BUTTON_GAP) * 2),
+		ui.PADDING + ((ui.BUTTON_WIDTH + ui.BUTTON_GAP) * 2),
 		78
 	)
 
@@ -4132,41 +4440,6 @@ local function CreateTrackerWindow()
 		OpenOptsWindow()
 	end
 	window.optsButton:SetHandler("OnClick", window.optsButton.OnClick)
-
-	function window:OnUpdate(dt)
-		if not runtime.active then
-			return
-		end
-
-		runtime.map.UpdatePendingOverlay(dt)
-
-		local delta = tonumber(dt) or 0
-		if delta > 1 then
-			delta = delta / 1000
-		end
-
-		runtime.updateElapsed = runtime.updateElapsed + delta
-		if runtime.updateElapsed < TARGET_REFRESH_SECONDS then
-			return
-		end
-		runtime.updateElapsed = 0
-		listSave.FlushPending()
-		listSave.MaybePruneSourceCaches()
-		RefreshTargetState()
-	end
-	window:SetHandler("OnUpdate", window.OnUpdate)
-
-	-- Also listen here (combatcloset registers HOTKEY_ACTION on its main visible window).
-	function window:OnEvent(event, ...)
-		if not runtime.active then
-			return
-		end
-		if event == "HOTKEY_ACTION" then
-			hotkeys.OnAction(...)
-		end
-	end
-	window:SetHandler("OnEvent", window.OnEvent)
-	window:RegisterEvent("HOTKEY_ACTION")
 end
 
 LoadLists()
@@ -4194,10 +4467,25 @@ eventWindow:AddAnchor("TOPLEFT", "UIParent", -100, -100)
 eventWindow:Show(true)
 
 function eventWindow:OnUpdate(dt)
-	if not runtime.active then
+	if not runtime.active or runtime.loading then
 		return
 	end
 	listSave.UpdateExportNotify()
+	runtime.map.UpdatePendingOverlay(dt)
+
+	local delta = tonumber(dt) or 0
+	if delta > 1 then
+		delta = delta / 1000
+	end
+
+	runtime.updateElapsed = runtime.updateElapsed + delta
+	if runtime.updateElapsed < timing.TARGET_REFRESH_SECONDS then
+		return
+	end
+	runtime.updateElapsed = 0
+	listSave.FlushPending()
+	listSave.MaybePruneSourceCaches()
+	RefreshTargetState()
 end
 eventWindow:SetHandler("OnUpdate", eventWindow.OnUpdate)
 
@@ -4205,17 +4493,39 @@ function eventWindow:OnEvent(event, ...)
 	if not runtime.active then
 		return
 	end
+	if event == "ENTERED_LOADING" then
+		runtime.loading = true
+		HideTrackerWindow()
+		return
+	end
+	if event == "LEFT_LOADING" then
+		runtime.loading = false
+		return
+	end
 	if event == "TARGET_CHANGED" or event == "ENTERED_WORLD" then
 		if event == "ENTERED_WORLD" then
 			-- Unit ids can change across zones; drop the cache so it re-derives.
+			runtime.loading = false
 			runtime.localPlayerUnitId = nil
+			ClearSessionUnitIds()
+			-- Allow marker writes again after zoning/loading.
+			runtime.markerWriteAttempts = {}
 			listSave.FlushNow()
 			hotkeys.RegisterAll()
 		end
+		if runtime.loading then
+			return
+		end
 		RefreshTargetState()
 	elseif event == "HOTKEY_ACTION" then
+		if runtime.loading then
+			return
+		end
 		hotkeys.OnAction(...)
 	elseif event == "COMBAT_MSG" then
+		if runtime.loading then
+			return
+		end
 		local eventType = tostring(select(2, ...) or "")
 		if string.find(eventType, "DAMAGE", 1, true) == nil then
 			return
@@ -4228,7 +4538,8 @@ function eventWindow:OnEvent(event, ...)
 			return
 		end
 		local sourceName = Trim(select(3, ...) or "")
-		if sourceName == "" or targetName == "" then
+		-- targetName may be empty when unitId already identifies the local player.
+		if sourceName == "" then
 			return
 		end
 		local msg = {
@@ -4251,6 +4562,8 @@ end
 eventWindow:SetHandler("OnEvent", eventWindow.OnEvent)
 eventWindow:RegisterEvent("TARGET_CHANGED")
 eventWindow:RegisterEvent("ENTERED_WORLD")
+eventWindow:RegisterEvent("ENTERED_LOADING")
+eventWindow:RegisterEvent("LEFT_LOADING")
 eventWindow:RegisterEvent("HOTKEY_ACTION")
 eventWindow:RegisterEvent("COMBAT_MSG")
 eventWindow:RegisterEvent("COMBAT_TEXT")
