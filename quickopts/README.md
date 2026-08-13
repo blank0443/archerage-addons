@@ -28,8 +28,6 @@ Click a row button to cycle or toggle that option. Chat confirms the change.
 3. Open the panel from the ESC menu, or restore it if it was left visible.
 4. Click a setting to change it. The same values stay in sync if you change them in the game Options UI.
 
-Do not run the standalone `skillqueue` addon at the same time. Both would fight over the same ESC menu slot.
-
 ## Files
 
 Each setting lives in its own file and registers a row with the hub in `ui.lua`. Add another option by creating a new file and listing it in `toc.g` after `ui.lua`.
