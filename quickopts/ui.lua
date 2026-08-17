@@ -155,11 +155,8 @@ local function LoadWindowVisible(defaultVisible)
 end
 
 local function GetWindowHeight()
-	local count = #runtime.modules
-	if count < 1 then
-		count = 1
-	end
-	return HEADER_HEIGHT + (count * ROW_HEIGHT) + PADDING
+	-- Zero modules: header + close button only. Rows grow as files register.
+	return HEADER_HEIGHT + (#runtime.modules * ROW_HEIGHT) + PADDING
 end
 
 local function ResizeWindow()
@@ -285,11 +282,257 @@ function QO.RegisterModule(module)
 	runtime.moduleById[module.id] = module
 
 	if runtime.window ~= nil then
-		AttachModule(module, #runtime.modules)
+		pcall(AttachModule, module, #runtime.modules)
 		ResizeWindow()
 		StartOptionSync()
 	end
 	return true
+end
+
+-- Checkboxes can come back as bools/strings; Lua tonumber(true) is nil.
+function QO.CoerceOptionValue(value)
+	if value == true then
+		return 1
+	end
+	if value == false then
+		return 0
+	end
+	if type(value) == "string" then
+		local lower = string.lower(value)
+		if lower == "true" or lower == "on" or lower == "yes" then
+			return 1
+		end
+		if lower == "false" or lower == "off" or lower == "no" then
+			return 0
+		end
+	end
+	local number = tonumber(value)
+	if number == nil then
+		return nil
+	end
+	local rounded = math.floor(number + 0.5)
+	if math.abs(number - rounded) < 0.001 then
+		return rounded
+	end
+	return number
+end
+
+function QO.ReadLiveOption(spec)
+	if type(spec) ~= "table" then
+		return nil
+	end
+
+	local function tryRaw(raw)
+		local number = QO.CoerceOptionValue(raw)
+		if number == nil then
+			return nil
+		end
+		-- Unmapped type-id numbers must fall through to optionName.
+		if spec.states ~= nil and QO.FindOptionStateIndex(spec.states, number) == nil then
+			return nil
+		end
+		return number
+	end
+
+	if type(spec.read) == "function" then
+		local ok, value = pcall(spec.read)
+		if ok then
+			return tryRaw(value)
+		end
+		return nil
+	end
+	if X2Option == nil then
+		return nil
+	end
+	local optionType = spec.optionType
+	if optionType ~= nil and type(X2Option.GetOptionItemValue) == "function" then
+		local ok, value = pcall(function()
+			return X2Option:GetOptionItemValue(optionType)
+		end)
+		if ok then
+			local number = tryRaw(value)
+			if number ~= nil then
+				return number
+			end
+		end
+	end
+	local optionName = spec.optionName
+	if optionName ~= nil and type(X2Option.GetOptionItemValueByName) == "function" then
+		local ok, value = pcall(function()
+			return X2Option:GetOptionItemValueByName(optionName)
+		end)
+		if ok then
+			return tryRaw(value)
+		end
+	end
+	return nil
+end
+
+function QO.WriteLiveOption(spec, value)
+	if type(spec) ~= "table" then
+		return false
+	end
+	if type(spec.write) == "function" then
+		local ok = pcall(spec.write, value)
+		return ok == true
+	end
+	if X2Option == nil then
+		return false
+	end
+	local number = tonumber(value)
+	if number == nil then
+		return false
+	end
+	local optionType = spec.optionType
+	if optionType ~= nil and type(X2Option.SetItemFloatValue) == "function" then
+		local ok = pcall(function()
+			X2Option:SetItemFloatValue(optionType, number)
+		end)
+		if ok then
+			return true
+		end
+	end
+	local optionName = spec.optionName
+	if optionName ~= nil and type(X2Option.SetItemFloatValueByName) == "function" then
+		local ok = pcall(function()
+			X2Option:SetItemFloatValueByName(optionName, number)
+		end)
+		if ok then
+			return true
+		end
+	end
+	return false
+end
+
+function QO.FindOptionStateIndex(states, value)
+	if type(states) ~= "table" then
+		return nil
+	end
+	local number = QO.CoerceOptionValue(value)
+	if number == nil then
+		return nil
+	end
+	for i = 1, #states do
+		local state = states[i]
+		if state ~= nil and QO.CoerceOptionValue(state.value) == number then
+			return i
+		end
+	end
+	return nil
+end
+
+-- Hub-owned row: setting files only pass id, title, option, and states.
+function QO.RegisterOption(spec)
+	local ok, registered = pcall(function()
+		if type(spec) ~= "table" or spec.id == nil then
+			return false
+		end
+		if type(spec.states) ~= "table" or #spec.states < 1 then
+			return false
+		end
+		if spec.optionType == nil and spec.optionName == nil and type(spec.read) ~= "function" then
+			return false
+		end
+
+		local optionSpec = spec
+		local lastValue = nil
+		local toggleButton = nil
+
+		local function Refresh()
+			if toggleButton == nil then
+				return false
+			end
+			local mode = QO.ReadLiveOption(optionSpec)
+			local index = QO.FindOptionStateIndex(optionSpec.states, mode)
+			if index == nil then
+				return false
+			end
+			if mode == lastValue then
+				return true
+			end
+			lastValue = mode
+			local state = optionSpec.states[index]
+			toggleButton:SetText(state.text or "")
+			QO.SetButtonTextColor(toggleButton, state.color)
+			return true
+		end
+
+		local function CycleOption()
+			local mode = QO.ReadLiveOption(optionSpec)
+			local index = QO.FindOptionStateIndex(optionSpec.states, mode)
+			-- Unreadable live value: write the first state instead of no-op.
+			if index == nil then
+				index = 0
+			end
+			local nextIndex = index + 1
+			if nextIndex > #optionSpec.states then
+				nextIndex = 1
+			end
+			local nextState = optionSpec.states[nextIndex]
+			if nextState == nil then
+				return
+			end
+			QO.WriteLiveOption(optionSpec, nextState.value)
+			if nextState.chat ~= nil and X2Chat ~= nil then
+				pcall(function()
+					X2Chat:DispatchChatMessage(CMF_SYSTEM, tostring(nextState.chat))
+				end)
+			end
+			Refresh()
+		end
+
+		local function Attach(layout)
+			if layout == nil or layout.parent == nil then
+				return
+			end
+			toggleButton = layout.parent:CreateChildWidget(
+				"button",
+				"quickOptsButton_" .. tostring(optionSpec.id),
+				0,
+				true
+			)
+			lastValue = nil
+			toggleButton:SetStyle("text_default")
+			toggleButton:SetText("")
+			toggleButton:SetExtent(layout.buttonWidth, layout.rowHeight - 4)
+			toggleButton:AddAnchor(
+				"TOPLEFT",
+				layout.parent,
+				layout.padding + layout.labelWidth + 2,
+				layout.y + 2
+			)
+			QO.SafeCall(toggleButton, "EnableDrag", true)
+
+			function toggleButton:OnDragStart()
+				layout.parent:StartMoving()
+			end
+			toggleButton:SetHandler("OnDragStart", toggleButton.OnDragStart)
+
+			function toggleButton:OnDragStop()
+				layout.parent:StopMovingOrSizing()
+				QO.SaveWindowPosition()
+			end
+			toggleButton:SetHandler("OnDragStop", toggleButton.OnDragStop)
+
+			function toggleButton:OnClick()
+				pcall(CycleOption)
+			end
+			toggleButton:SetHandler("OnClick", toggleButton.OnClick)
+			Refresh()
+		end
+
+		return QO.RegisterModule({
+			id = optionSpec.id,
+			title = optionSpec.title or optionSpec.id,
+			Attach = Attach,
+			Refresh = Refresh,
+		})
+	end)
+
+	if not ok then
+		return false
+	end
+	return registered == true
 end
 
 function QO.LayoutModules()
