@@ -46,6 +46,9 @@ local persist = {
 	NOTE_POSITION_KEY = "dpsBasicsUnitTrackerNotePosition",
 	LEGACY_NOTE_POSITION_KEY = "dpsBasicsPlayerTrackerNotePosition",
 	OPTS_POSITION_KEY = "dpsBasicsUnitTrackerOptsPosition",
+	SETTINGS_KEY = "dpsBasicsUnitTrackerSettings",
+	-- One-shot: SaveData is per-addon; lists from dpsbasics need a file import once.
+	IMPORT_DONE_KEY = "unitTrackerImportedFromDpsbasics",
 }
 
 local timing = {
@@ -78,7 +81,7 @@ local ui = {
 	NOTE_WINDOW_WIDTH = 208,
 	NOTE_WINDOW_HEIGHT = 198,
 	OPTS_WINDOW_WIDTH = 170,
-	OPTS_WINDOW_HEIGHT = 168,
+	OPTS_WINDOW_HEIGHT = 228,
 	NOTE_PREVIEW_LINE_HEIGHT = 16,
 	NOTE_PREVIEW_TOP = 30,
 	PADDING = 10,
@@ -178,6 +181,10 @@ local runtime = {
 	},
 	hotkeyCapture = nil,
 	hotkeyCaptureInput = nil,
+	settings = {
+		autoOpenDamage = true,
+		autoOpenListedTarget = true,
+	},
 	friendlyPage = 1,
 	hostilePage = 1,
 	viewTab = "friendly",
@@ -1845,6 +1852,90 @@ function hotkeys.RefreshButtons()
 	end
 end
 
+-- Auto-open prefs: combat damage popup and listed-target popup. Defaults stay on.
+local settings = {
+	ON_COLOR = LIST_COLORS.friendly,
+	OFF_COLOR = LIST_COLORS.hostile,
+}
+
+function settings.CoerceBool(value, default)
+	if value == nil then
+		return default ~= false
+	end
+	return value == true
+end
+
+function settings.Save()
+	SaveData(persist.SETTINGS_KEY, {
+		autoOpenDamage = runtime.settings.autoOpenDamage == true,
+		autoOpenListedTarget = runtime.settings.autoOpenListedTarget == true,
+	})
+end
+
+function settings.Load()
+	runtime.settings.autoOpenDamage = true
+	runtime.settings.autoOpenListedTarget = true
+	local data = LoadData(persist.SETTINGS_KEY)
+	if type(data) ~= "table" then
+		return
+	end
+	runtime.settings.autoOpenDamage = settings.CoerceBool(data.autoOpenDamage, true)
+	runtime.settings.autoOpenListedTarget = settings.CoerceBool(data.autoOpenListedTarget, true)
+end
+
+function settings.IsAutoOpenDamage()
+	return runtime.settings.autoOpenDamage == true
+end
+
+function settings.IsAutoOpenListedTarget()
+	return runtime.settings.autoOpenListedTarget == true
+end
+
+function settings.ButtonLabel(key)
+	local on = runtime.settings[key] == true
+	if key == "autoOpenDamage" then
+		if on then
+			return "Dmg popup: On"
+		end
+		return "Dmg popup: Off"
+	end
+	if on then
+		return "List popup: On"
+	end
+	return "List popup: Off"
+end
+
+function settings.RefreshButtons()
+	local optsWindow = runtime.optsWindow
+	if optsWindow == nil then
+		return
+	end
+
+	local function Paint(button, key)
+		if button == nil then
+			return
+		end
+		button:SetText(settings.ButtonLabel(key))
+		local color = settings.OFF_COLOR
+		if runtime.settings[key] == true then
+			color = settings.ON_COLOR
+		end
+		SafeCall(button, "SetTextColor", color[1], color[2], color[3], color[4])
+	end
+
+	Paint(optsWindow.damagePopupButton, "autoOpenDamage")
+	Paint(optsWindow.listPopupButton, "autoOpenListedTarget")
+end
+
+function settings.Toggle(key)
+	if key ~= "autoOpenDamage" and key ~= "autoOpenListedTarget" then
+		return
+	end
+	runtime.settings[key] = runtime.settings[key] ~= true
+	settings.Save()
+	settings.RefreshButtons()
+end
+
 function hotkeys.CancelCapture()
 	if runtime.hotkeyCapture == nil then
 		return
@@ -2080,14 +2171,247 @@ end
 
 local function BuildExportFilePaths(fileName)
 	local paths = {}
-	-- Prefer the loaded addon directory, then the Documents/Addon path used by other addons.
+	-- Prefer the loaded addon directory, then unittacker / legacy dpsbasics Documents paths.
 	local sourceDirectory = GetAddonSourceDirectory()
 	if sourceDirectory ~= nil then
 		AddUniquePath(paths, sourceDirectory .. "/" .. fileName)
 	end
+	AddUniquePath(paths, "../Documents/Addon/unittacker/" .. fileName)
+	AddUniquePath(paths, "unittacker/" .. fileName)
 	AddUniquePath(paths, "../Documents/Addon/dpsbasics/" .. fileName)
 	AddUniquePath(paths, "dpsbasics/" .. fileName)
+	AddUniquePath(paths, fileName)
 	return paths
+end
+
+function listSave.UnescapeFileField(value)
+	local text = tostring(value or "")
+	local out = {}
+	local index = 1
+	local length = string.len(text)
+	while index <= length do
+		local ch = string.sub(text, index, index)
+		if ch == "\\" and index < length then
+			local nextCh = string.sub(text, index + 1, index + 1)
+			if nextCh == "n" then
+				table.insert(out, "\n")
+			elseif nextCh == "t" then
+				table.insert(out, "\t")
+			elseif nextCh == "r" then
+				table.insert(out, "\r")
+			elseif nextCh == "\\" then
+				table.insert(out, "\\")
+			else
+				table.insert(out, nextCh)
+			end
+			index = index + 2
+		else
+			table.insert(out, ch)
+			index = index + 1
+		end
+	end
+	return table.concat(out)
+end
+
+function listSave.CountLoadedEntries()
+	return #runtime.friendlyOrder + #runtime.hostileOrder
+end
+
+function listSave.ParseExportLocation(text)
+	text = Trim(text)
+	if text == "" then
+		return nil
+	end
+	local coords = text
+	local zoneGroup = nil
+	local coordsPart, zonePart = string.match(text, "^(.-)%s*|%s*[Zz]one%s+(%-?%d+)%s*$")
+	if coordsPart ~= nil then
+		coords = coordsPart
+		zoneGroup = tonumber(zonePart)
+	end
+	local x, y, z = string.match(coords, "^%s*([%-%d%.]+)%s*,%s*([%-%d%.]+)%s*,%s*([%-%d%.]+)")
+	if x == nil then
+		x, y = string.match(coords, "^%s*([%-%d%.]+)%s*,%s*([%-%d%.]+)")
+	end
+	if x == nil or y == nil then
+		return nil
+	end
+	return runtime.map.Normalize({
+		x = tonumber(x),
+		y = tonumber(y),
+		z = tonumber(z) or 0,
+		zoneGroup = zoneGroup,
+	})
+end
+
+function listSave.SplitExportFields(line)
+	local fields = {}
+	local rest = tostring(line or "")
+	while true do
+		local tabAt = string.find(rest, "\t", 1, true)
+		if tabAt == nil then
+			table.insert(fields, listSave.UnescapeFileField(rest))
+			break
+		end
+		table.insert(fields, listSave.UnescapeFileField(string.sub(rest, 1, tabAt - 1)))
+		rest = string.sub(rest, tabAt + 1)
+	end
+	return fields
+end
+
+function listSave.ReadFirstExistingFile(fileName)
+	for _, path in ipairs(BuildExportFilePaths(fileName)) do
+		local file = TryOpenFile(path, "r")
+		if file ~= nil then
+			local ok, content = pcall(function()
+				local text = file:read("*a")
+				file:close()
+				return text
+			end)
+			if not ok then
+				pcall(function()
+					file:close()
+				end)
+			elseif type(content) == "string" and Trim(content) ~= "" then
+				return content, path
+			end
+		end
+	end
+	return nil, nil
+end
+
+function listSave.ImportExportContent(content)
+	if type(content) ~= "string" or content == "" then
+		return 0
+	end
+
+	local section = nil
+	local imported = 0
+	for line in string.gmatch(content .. "\n", "(.-)\n") do
+		line = string.gsub(line, "\r$", "")
+		local trimmed = Trim(line)
+		if trimmed ~= "" and string.sub(trimmed, 1, 1) ~= "#" then
+			local sectionName = string.match(trimmed, "^%[(.-)%]$")
+			if sectionName ~= nil then
+				local lower = string.lower(sectionName)
+				if lower == "friendly" then
+					section = "friendly"
+				elseif lower == "hostile" then
+					section = "hostile"
+				else
+					section = nil
+				end
+			elseif section ~= nil then
+				local fields = listSave.SplitExportFields(line)
+				local name = Trim(fields[1] or "")
+				if name ~= "" then
+					local entry = {
+						name = name,
+						unitId = fields[2],
+						addedAt = fields[3],
+						note = fields[4],
+						guild = fields[6],
+					}
+					local location = listSave.ParseExportLocation(fields[5] or "")
+					if location ~= nil then
+						entry.location = location
+					end
+					local list = runtime.hostile
+					local order = runtime.hostileOrder
+					if section == "friendly" then
+						list = runtime.friendly
+						order = runtime.friendlyOrder
+					end
+					local before = listSave.CountLoadedEntries()
+					LoadSavedEntry(nil, entry, list, order)
+					if listSave.CountLoadedEntries() > before then
+						imported = imported + 1
+					end
+				end
+			end
+		end
+	end
+	return imported
+end
+
+function listSave.TryImportRecovery()
+	local candidates = {
+		"migrate_unit_tracker_from_dpsbasics.txt",
+		"export_unit_tracker_2026-08-01.txt",
+		"export_unit_tracker_2026-07-27.txt",
+		"export_unit_tracker_2026-07-21.txt",
+	}
+	local dateText = string.gsub(tostring(GetCurrentDateText()), "[^%w%-_]", "-")
+	table.insert(candidates, 2, "export_unit_tracker_" .. dateText .. ".txt")
+
+	for _, fileName in ipairs(candidates) do
+		local content, path = listSave.ReadFirstExistingFile(fileName)
+		if content ~= nil then
+			local imported = listSave.ImportExportContent(content)
+			if imported > 0 then
+				return imported, path
+			end
+		end
+	end
+	return 0, nil
+end
+
+function listSave.FinishImportRecovery(imported, path)
+	if imported == nil or imported <= 0 then
+		return false
+	end
+	SaveLists(true)
+	SaveData(persist.IMPORT_DONE_KEY, true)
+	runtime.listsImportRetryAt = nil
+	if DispatchExportStatus ~= nil then
+		DispatchExportStatus(
+			"[Unit Tracker] Restored " .. tostring(imported) .. " entries from " .. tostring(path) .. "."
+		)
+	end
+	return true
+end
+
+-- SaveData is per-addon. After the move out of dpsbasics, empty unittacker saves need a file restore.
+function listSave.LoadListsWithRecovery()
+	LoadLists()
+	if listSave.CountLoadedEntries() > 0 then
+		return
+	end
+	if LoadData(persist.IMPORT_DONE_KEY) == true then
+		return
+	end
+
+	local imported, path = listSave.TryImportRecovery()
+	if listSave.FinishImportRecovery(imported, path) then
+		return
+	end
+
+	-- dpsbasics migrator may write after this addon loads; retry briefly.
+	runtime.listsImportRetries = 0
+	runtime.listsImportRetryAt = Now() + 2
+end
+
+function listSave.MaybeRetryImportRecovery()
+	if runtime.listsImportRetryAt == nil then
+		return
+	end
+	if Now() < runtime.listsImportRetryAt then
+		return
+	end
+	runtime.listsImportRetryAt = nil
+	if listSave.CountLoadedEntries() > 0 or LoadData(persist.IMPORT_DONE_KEY) == true then
+		return
+	end
+
+	local imported, path = listSave.TryImportRecovery()
+	if listSave.FinishImportRecovery(imported, path) then
+		return
+	end
+
+	runtime.listsImportRetries = (runtime.listsImportRetries or 0) + 1
+	if runtime.listsImportRetries < 8 then
+		runtime.listsImportRetryAt = Now() + 2
+	end
 end
 
 function listSave.ExportFileExists(fileName)
@@ -2774,10 +3098,10 @@ local function RefreshTargetState()
 		UpdateWindowText()
 	end
 
-	-- Hostile + notes: open the main tracker so the note preview is visible.
-	if listName == "hostile"
-		and note ~= ""
-		and (targetChanged or listChanged or noteChanged)
+	-- Listed target (friendly or hostile): open the main tracker for notes/context.
+	if settings.IsAutoOpenListedTarget()
+		and listName ~= nil
+		and (targetChanged or listChanged)
 		and runtime.window ~= nil
 		and not runtime.window:IsVisible()
 	then
@@ -2930,6 +3254,8 @@ local function IsRemoveConfirmPending(listName, key)
 	return pending ~= nil and pending.listName == listName and pending.key == key
 end
 
+local RefreshNoteRemoveConfirm
+
 local function ClearRemoveConfirm()
 	if runtime.removeConfirm == nil then
 		return
@@ -2937,6 +3263,13 @@ local function ClearRemoveConfirm()
 	runtime.removeConfirm = nil
 	if UpdateViewWindow ~= nil then
 		UpdateViewWindow()
+	end
+	if RefreshNoteRemoveConfirm ~= nil then
+		RefreshNoteRemoveConfirm()
+	end
+	local noteWindow = runtime.noteWindow
+	if noteWindow ~= nil and noteWindow.statusLabel ~= nil and noteWindow:IsVisible() then
+		noteWindow.statusLabel:SetText("")
 	end
 end
 
@@ -2950,6 +3283,9 @@ local function BeginRemoveConfirm(listName, key)
 	}
 	if UpdateViewWindow ~= nil then
 		UpdateViewWindow()
+	end
+	if RefreshNoteRemoveConfirm ~= nil then
+		RefreshNoteRemoveConfirm()
 	end
 end
 
@@ -3066,6 +3402,30 @@ local function SetWindowStatus(window, message, color)
 	end
 end
 
+RefreshNoteRemoveConfirm = function()
+	local noteWindow = runtime.noteWindow
+	if noteWindow == nil then
+		return
+	end
+
+	local key = runtime.noteTargetKey
+	local listName = nil
+	if key ~= nil and key ~= "" then
+		listName = select(1, FindTrackedEntry(key, nil))
+	end
+	local confirming = listName ~= nil and IsRemoveConfirmPending(listName, key)
+
+	SetWidgetVisible(noteWindow.removeButton, not confirming)
+	SetWidgetVisible(noteWindow.mapButton, not confirming)
+	SetWidgetVisible(noteWindow.saveButton, not confirming)
+	SetWidgetVisible(noteWindow.confirmNoButton, confirming)
+	SetWidgetVisible(noteWindow.confirmYesButton, confirming)
+
+	if confirming then
+		SetWindowStatus(noteWindow, "Remove from list?", { 1, 0.52, 0.42, 1 })
+	end
+end
+
 local function NormalizeDt(dt)
 	local delta = tonumber(dt) or 0
 	if delta > 1 then
@@ -3156,6 +3516,11 @@ local function CreateNoteWindow()
 		{ 0.95, 0.92, 0.82, 1 }
 	)
 	SafeCall(noteWindow.titleLabel, "EnableDrag", true)
+	-- Clickable so left-click can post the full name to local system chat for copy.
+	SafeCall(noteWindow.titleLabel, "Clickable", true)
+	SafeCall(noteWindow.titleLabel, "EnablePick", true)
+	SafeCall(noteWindow.titleLabel, "EnableHitTest", true)
+	SafeCall(noteWindow.titleLabel, "SetHitTestEnabled", true)
 
 	noteWindow.closeButton = noteWindow:CreateChildWidget("button", "dpsBasicsUnitTrackerNoteCloseButton", 0, true)
 	noteWindow.closeButton:SetStyle("text_default")
@@ -3181,12 +3546,15 @@ local function CreateNoteWindow()
 	end
 
 	local actionY = dateY + ui.NOTE_DATE_LABEL_HEIGHT + ui.NOTE_AFTER_DATE_GAP
-	local mapButtonX = ui.NOTE_WINDOW_WIDTH - ui.PADDING - ui.BUTTON_WIDTH - ui.BUTTON_GAP - runtime.map.BUTTON_SIZE
+	local actionBtnSize = runtime.map.BUTTON_SIZE
+	local saveX = ui.NOTE_WINDOW_WIDTH - ui.PADDING - ui.BUTTON_WIDTH
+	local mapButtonX = saveX - ui.BUTTON_GAP - actionBtnSize
+	local removeButtonX = mapButtonX - ui.BUTTON_GAP - actionBtnSize
 	noteWindow.statusLabel = CreateLabel(
 		noteWindow,
 		"dpsBasicsUnitTrackerNoteStatus",
 		"",
-		mapButtonX - ui.PADDING - 4,
+		removeButtonX - ui.PADDING - 4,
 		18,
 		ui.PADDING,
 		actionY + 4,
@@ -3194,11 +3562,36 @@ local function CreateNoteWindow()
 		{ 0.72, 0.86, 1, 1 }
 	)
 
+	-- Remove sits left of Map/Save; drops this player from friendly/hostile listing.
+	noteWindow.removeButton = noteWindow:CreateChildWidget("button", "dpsBasicsUnitTrackerNoteRemoveButton", 0, true)
+	noteWindow.removeButton:SetStyle("text_default")
+	noteWindow.removeButton:SetText("R")
+	noteWindow.removeButton:SetExtent(actionBtnSize, actionBtnSize)
+	noteWindow.removeButton:AddAnchor("TOPLEFT", noteWindow, removeButtonX, actionY)
+	noteWindow.removeButton:Show(true)
+	SetButtonTextColor(noteWindow.removeButton, LIST_COLORS.hostile)
+
+	-- N/Y confirm replaces R/M/Save while a note remove is pending.
+	noteWindow.confirmNoButton = noteWindow:CreateChildWidget("button", "dpsBasicsUnitTrackerNoteConfirmNo", 0, true)
+	noteWindow.confirmNoButton:SetStyle("text_default")
+	noteWindow.confirmNoButton:SetText("N")
+	noteWindow.confirmNoButton:SetExtent(actionBtnSize, actionBtnSize)
+	noteWindow.confirmNoButton:AddAnchor("TOPLEFT", noteWindow, removeButtonX, actionY)
+	noteWindow.confirmNoButton:Show(false)
+
+	noteWindow.confirmYesButton = noteWindow:CreateChildWidget("button", "dpsBasicsUnitTrackerNoteConfirmYes", 0, true)
+	noteWindow.confirmYesButton:SetStyle("text_default")
+	noteWindow.confirmYesButton:SetText("Y")
+	noteWindow.confirmYesButton:SetExtent(actionBtnSize, actionBtnSize)
+	noteWindow.confirmYesButton:AddAnchor("TOPLEFT", noteWindow, mapButtonX, actionY)
+	noteWindow.confirmYesButton:Show(false)
+	SetButtonTextColor(noteWindow.confirmYesButton, LIST_COLORS.hostile)
+
 	-- Map button sits immediately left of Save; opens saved add-location like kill_count history.
 	noteWindow.mapButton = noteWindow:CreateChildWidget("button", "dpsBasicsUnitTrackerNoteMapButton", 0, true)
 	noteWindow.mapButton:SetStyle("text_default")
 	noteWindow.mapButton:SetText("M")
-	noteWindow.mapButton:SetExtent(runtime.map.BUTTON_SIZE, runtime.map.BUTTON_SIZE)
+	noteWindow.mapButton:SetExtent(actionBtnSize, actionBtnSize)
 	noteWindow.mapButton:AddAnchor("TOPLEFT", noteWindow, mapButtonX, actionY)
 	noteWindow.mapButton:Show(true)
 	noteWindow.mapButton:Enable(false)
@@ -3207,7 +3600,7 @@ local function CreateNoteWindow()
 		noteWindow,
 		"dpsBasicsUnitTrackerNoteSaveButton",
 		"Save",
-		ui.NOTE_WINDOW_WIDTH - ui.PADDING - ui.BUTTON_WIDTH,
+		saveX,
 		actionY
 	)
 
@@ -3233,6 +3626,20 @@ local function CreateNoteWindow()
 	end
 	noteWindow.titleLabel:SetHandler("OnDragStop", noteWindow.titleLabel.OnDragStop)
 
+	-- Left-click posts the full player name to local system chat for chat-line copy.
+	function noteWindow.titleLabel:OnClick()
+		local name = GetTrackedNameForKey(runtime.noteTargetKey)
+		if name == nil or Trim(tostring(name)) == "" then
+			SetWindowStatus(noteWindow, "No player name.", { 1, 0.52, 0.42, 1 })
+			return
+		end
+		if DispatchExportStatus ~= nil then
+			DispatchExportStatus(tostring(name))
+		end
+		SetWindowStatus(noteWindow, "Name sent to chat.", { 0.72, 0.86, 1, 1 })
+	end
+	noteWindow.titleLabel:SetHandler("OnClick", noteWindow.titleLabel.OnClick)
+
 	function noteWindow.closeButton:OnClick()
 		SaveNoteWindowPosition()
 		noteWindow:Show(false)
@@ -3243,6 +3650,37 @@ local function CreateNoteWindow()
 		runtime.map.OpenNoteTargetLocation()
 	end
 	noteWindow.mapButton:SetHandler("OnClick", noteWindow.mapButton.OnClick)
+
+	function noteWindow.removeButton:OnClick()
+		local key = runtime.noteTargetKey
+		if key == nil or key == "" then
+			SetWindowStatus(noteWindow, "No player selected.", { 1, 0.52, 0.42, 1 })
+			return
+		end
+		local listName = select(1, FindTrackedEntry(key, nil))
+		if listName == nil then
+			SetWindowStatus(noteWindow, "Not on a list.", { 1, 0.52, 0.42, 1 })
+			return
+		end
+		BeginRemoveConfirm(listName, key)
+	end
+	noteWindow.removeButton:SetHandler("OnClick", noteWindow.removeButton.OnClick)
+
+	function noteWindow.confirmNoButton:OnClick()
+		ClearRemoveConfirm()
+	end
+	noteWindow.confirmNoButton:SetHandler("OnClick", noteWindow.confirmNoButton.OnClick)
+
+	function noteWindow.confirmYesButton:OnClick()
+		local key = runtime.noteTargetKey
+		local listName = key ~= nil and select(1, FindTrackedEntry(key, nil)) or nil
+		if listName == nil or key == nil then
+			ClearRemoveConfirm()
+			return
+		end
+		RemoveNameFromList(listName, key)
+	end
+	noteWindow.confirmYesButton:SetHandler("OnClick", noteWindow.confirmYesButton.OnClick)
 
 	function noteWindow.saveButton:OnClick()
 		SaveNoteFromInput()
@@ -3278,6 +3716,14 @@ local function OpenNoteWindow(key)
 	end
 	SetEditBoxText(runtime.noteInputState, runtime.noteText, true)
 	SetWindowStatus(noteWindow, "", { 0.72, 0.86, 1, 1 })
+	-- Drop any leftover View List / prior-note remove confirm when opening a note.
+	if runtime.removeConfirm ~= nil and runtime.removeConfirm.key ~= key then
+		runtime.removeConfirm = nil
+		if UpdateViewWindow ~= nil then
+			UpdateViewWindow()
+		end
+	end
+	RefreshNoteRemoveConfirm()
 	runtime.map.RefreshNoteMapButton()
 	noteWindow:Show(true)
 end
@@ -4063,6 +4509,26 @@ local function CreateOptsWindow()
 	optsWindow.exportButton:SetExtent(fullButtonWidth, ui.BUTTON_HEIGHT)
 	buttonY = buttonY + ui.BUTTON_HEIGHT + ui.BUTTON_GAP
 
+	optsWindow.damagePopupButton = CreateButton(
+		optsWindow,
+		"dpsBasicsUnitTrackerOptsDamagePopupButton",
+		settings.ButtonLabel("autoOpenDamage"),
+		ui.PADDING,
+		buttonY
+	)
+	optsWindow.damagePopupButton:SetExtent(fullButtonWidth, ui.BUTTON_HEIGHT)
+	buttonY = buttonY + ui.BUTTON_HEIGHT + ui.BUTTON_GAP
+
+	optsWindow.listPopupButton = CreateButton(
+		optsWindow,
+		"dpsBasicsUnitTrackerOptsListPopupButton",
+		settings.ButtonLabel("autoOpenListedTarget"),
+		ui.PADDING,
+		buttonY
+	)
+	optsWindow.listPopupButton:SetExtent(fullButtonWidth, ui.BUTTON_HEIGHT)
+	buttonY = buttonY + ui.BUTTON_HEIGHT + ui.BUTTON_GAP
+
 	local hotkeyButtonWidth = fullButtonWidth - ui.VIEW_REMOVE_BUTTON_WIDTH - ui.VIEW_CONFIRM_GAP
 
 	optsWindow.friendlyHotkeyButton = CreateButton(
@@ -4180,6 +4646,18 @@ local function CreateOptsWindow()
 	end
 	optsWindow.exportButton:SetHandler("OnClick", optsWindow.exportButton.OnClick)
 
+	function optsWindow.damagePopupButton:OnClick()
+		hotkeys.CancelCapture()
+		settings.Toggle("autoOpenDamage")
+	end
+	optsWindow.damagePopupButton:SetHandler("OnClick", optsWindow.damagePopupButton.OnClick)
+
+	function optsWindow.listPopupButton:OnClick()
+		hotkeys.CancelCapture()
+		settings.Toggle("autoOpenListedTarget")
+	end
+	optsWindow.listPopupButton:SetHandler("OnClick", optsWindow.listPopupButton.OnClick)
+
 	function optsWindow.friendlyHotkeyButton:OnClick()
 		hotkeys.BeginCapture("friendly")
 	end
@@ -4203,12 +4681,14 @@ local function CreateOptsWindow()
 	optsWindow.hostileHotkeyClearButton:SetHandler("OnClick", optsWindow.hostileHotkeyClearButton.OnClick)
 
 	hotkeys.RefreshButtons()
+	settings.RefreshButtons()
 	return optsWindow
 end
 
 local function OpenOptsWindow()
 	local optsWindow = CreateOptsWindow()
 	hotkeys.RefreshButtons()
+	settings.RefreshButtons()
 	optsWindow:Show(true)
 end
 
@@ -4242,6 +4722,9 @@ local function ShowTrackerWindow()
 end
 
 local function OpenTrackerWindowForIncomingDamage()
+	if not settings.IsAutoOpenDamage() then
+		return
+	end
 	if runtime.loading then
 		return
 	end
@@ -4259,6 +4742,9 @@ end
 local function HandleCombatTextMessage(...)
 	-- Auto-open is the only consumer of COMBAT_TEXT, so skip all work (including the
 	-- message-table allocation) whenever an auto-open could not happen anyway.
+	if not settings.IsAutoOpenDamage() then
+		return
+	end
 	if runtime.loading then
 		return
 	end
@@ -4442,9 +4928,10 @@ local function CreateTrackerWindow()
 	window.optsButton:SetHandler("OnClick", window.optsButton.OnClick)
 end
 
-LoadLists()
+listSave.LoadListsWithRecovery()
 hotkeys.Load()
 hotkeys.RegisterAll()
+settings.Load()
 CreateTrackerWindow()
 RefreshTargetState()
 
@@ -4483,6 +4970,7 @@ function eventWindow:OnUpdate(dt)
 		return
 	end
 	runtime.updateElapsed = 0
+	listSave.MaybeRetryImportRecovery()
 	listSave.FlushPending()
 	listSave.MaybePruneSourceCaches()
 	RefreshTargetState()
@@ -4523,6 +5011,9 @@ function eventWindow:OnEvent(event, ...)
 		end
 		hotkeys.OnAction(...)
 	elseif event == "COMBAT_MSG" then
+		if not settings.IsAutoOpenDamage() then
+			return
+		end
 		if runtime.loading then
 			return
 		end
