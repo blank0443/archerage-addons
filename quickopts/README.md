@@ -46,7 +46,7 @@ The client only runs Lua files listed in `toc.g`. That is why a new file still n
 
 The window still opens. Only that row is gone.
 
-If you delete the file but leave it listed in `toc.g`, the client may refuse to load the whole addon. Remove the `toc.g` line whenever you remove a file.
+If you delete the file but leave it listed in `toc.g`, the client may refuse to load the whole addon. Remove the file name in `toc.g` whenever you remove a file.
 
 ### Add a setting
 
@@ -64,7 +64,7 @@ ADDON:ImportAPI(API_TYPE.OPTION.id)
 
 QO.RegisterOption({
 	id = "auto_target",
-	title = "Auto Target",
+	title = "Name for the button",
 	optionType = OIT_AUTO_ENEMY_TARGETING,
 	states = {
 		{ value = 0, text = "Off", color = { 0.9, 0.333, 0.333, 1 }, chat = "Auto Target disabled." },
@@ -72,6 +72,9 @@ QO.RegisterOption({
 	},
 })
 ```
+
+
+`optionType` the `X2Option.optionType` which represents the setting. Ex: `OIT_OPTION_ITEM_MOUNT_ONLY_MY_PET` represents **Mount my mount only** setting
 
 Optional fields:
 
