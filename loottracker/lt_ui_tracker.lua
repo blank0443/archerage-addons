@@ -910,13 +910,23 @@ runtime:LoadWindowScale()
 runtime:LoadMenuMode()
 runtime.LoadTrackedItems()
 runtime.trackerLayout = runtime.LoadTrackerLayout()
+-- Restore open/hidden intent before widgets are shown (disk → in-memory flag).
+if runtime.LoadWindowVisible ~= nil then
+	local savedVisible = runtime:LoadWindowVisible()
+	if savedVisible ~= nil then
+		runtime.trackerWindowVisible = savedVisible == true
+	elseif LT.uiRefreshTrackerVisible ~= nil then
+		runtime.trackerWindowVisible = LT.uiRefreshTrackerVisible == true
+	end
+end
 
 runtime.window = CreateEmptyWindow("lootTrackerWindow", "UIParent")
 runtime.window = runtime.window
 runtime.window:SetExtent(runtime.GetTrackerWindowWidth(), runtime.GetTrackerWindowHeight())
 runtime.window:EnableDrag(true)
 runtime.window:Clickable(true)
-runtime.window:Show(true)
+-- Stay hidden until refresh/cold-start visibility is applied at the end of this file.
+runtime.window:Show(false)
 
 local savedX, savedY = runtime.LoadWindowPosition()
 runtime.window:AddAnchor("TOPLEFT", "UIParent", savedX, savedY)
@@ -958,6 +968,7 @@ function runtime.CenterLootTrackerWindow()
 	if runtime.setWindow ~= nil then
 		runtime.setWindow:Show(false)
 	end
+	runtime.trackerWindowVisible = true
 	runtime.window:Show(true)
 	if runtime.SetTrackerHeaderControlsVisible ~= nil then
 		runtime.SetTrackerHeaderControlsVisible(true)
@@ -974,6 +985,9 @@ function runtime.CenterLootTrackerWindow()
 	restoreButton:AddAnchor("CENTER", "UIParent", 0, 0)
 	runtime.SaveRestoreButtonPosition(restoreButton)
 	runtime.UpdateRows()
+	if runtime.SaveWindowVisible ~= nil then
+		runtime:SaveWindowVisible(true)
+	end
 end
 	-- Hides the loot tracker window, saves position, closes picker, shows restore button.
 
@@ -989,9 +1003,13 @@ function runtime.HideLootTrackerWindow()
 	if runtime.setWindow ~= nil then
 		runtime.setWindow:Show(false)
 	end
+	runtime.trackerWindowVisible = false
 	if runtime.menuMode then
 		runtime.window:Show(false)
 		restoreButton:Show(false)
+		if runtime.SaveWindowVisible ~= nil then
+			runtime:SaveWindowVisible(false)
+		end
 		return
 	end
 	if not runtime.restoreButtonPositionSaved then
@@ -1000,11 +1018,14 @@ function runtime.HideLootTrackerWindow()
 	end
 	runtime.window:Show(false)
 	restoreButton:Show(true)
-	-- Shows the loot tracker window at saved position, hides restore button, marks inventory dirty, applies layout and updates rows.
+	if runtime.SaveWindowVisible ~= nil then
+		runtime:SaveWindowVisible(false)
+	end
 end
 
 function runtime.ShowLootTrackerWindow(overrideX, overrideY)
 	runtime.trackerHeaderControlsVisible = true
+	runtime.trackerWindowVisible = true
 	local windowX, windowY
 	if overrideX ~= nil and overrideY ~= nil then
 		windowX, windowY = overrideX, overrideY
@@ -1029,8 +1050,10 @@ function runtime.ShowLootTrackerWindow(overrideX, overrideY)
 	SafeMethod(runtime.window, "CorrectOffsetByScreen")
 	runtime.MarkInventoryDirty()
 	runtime.ApplyTrackerLayout()
-	-- Shows the loot tracker window when restore button is clicked.
 	runtime.UpdateRows()
+	if runtime.SaveWindowVisible ~= nil then
+		runtime:SaveWindowVisible(true)
+	end
 end
 
 if runtime.menuMode or _G.__LOOT_TRACKER_ESC_MENU_BUTTON_ADDED == true then
@@ -2254,4 +2277,26 @@ runtime.resizeHandles = {
 
 runtime.ApplyTrackerLayout()
 runtime.HideTrackerHeaderControls()
+
+-- Apply open/hidden from trackerWindowVisible (loaded earlier from disk / refresh flags).
+do
+	LT.uiRefreshTrackerVisible = nil
+	LT.uiRefreshRestoreVisible = nil
+	if runtime.trackerWindowVisible == true then
+		runtime.ShowLootTrackerWindow()
+	elseif runtime.HideLootTrackerWindow ~= nil then
+		runtime.HideLootTrackerWindow()
+	else
+		runtime.window:Show(false)
+		if runtime.restoreButton ~= nil then
+			runtime.restoreButton:Show((not runtime.menuMode))
+		end
+		if runtime.SetResizeHandlesVisible ~= nil then
+			runtime:SetResizeHandlesVisible(false)
+		end
+		if runtime.SaveWindowVisible ~= nil then
+			runtime:SaveWindowVisible(false)
+		end
+	end
+end
 

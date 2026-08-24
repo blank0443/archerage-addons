@@ -23,6 +23,7 @@ local C = {
 	SET_WINDOW_POSITION_KEY = "lootTrackerSetWindowPosition",
 	LAYOUT_KEY = "lootTrackerLayout",
 	MENU_MODE_KEY = "lootTrackerEscMenuMode",
+	WINDOW_VISIBLE_KEY = "lootTrackerWindowVisible",
 	SETS_KEY = "lootTrackerTrackedItemSets",
 	ACTIVE_SET_KEY = "lootTrackerActiveSetName",
 	DROP_RATE_KEY = "drop_rate_mul",

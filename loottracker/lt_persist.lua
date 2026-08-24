@@ -177,6 +177,36 @@ function runtime:LoadMenuMode()
 	end
 end
 
+-- Persist open/hidden so UI refresh cannot force the tracker back open.
+function runtime:SaveWindowVisible(isVisible)
+	pcall(function()
+		ADDON:ClearData(CONFIG.WINDOW_VISIBLE_KEY)
+		ADDON:SaveData(CONFIG.WINDOW_VISIBLE_KEY, {
+			visible = isVisible == true,
+		})
+	end)
+end
+
+-- Returns true/false when saved, or nil on first run / missing data.
+function runtime:LoadWindowVisible()
+	local ok, data = pcall(function()
+		return ADDON:LoadData(CONFIG.WINDOW_VISIBLE_KEY)
+	end)
+	if not ok then
+		return nil
+	end
+	if type(data) == "table" then
+		if data.visible == nil then
+			return nil
+		end
+		return data.visible == true
+	end
+	if type(data) == "boolean" then
+		return data == true
+	end
+	return nil
+end
+
 function runtime:SaveSlotCount()
 	pcall(function()
 		ADDON:ClearData("lootTrackerSlotCount")

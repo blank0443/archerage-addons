@@ -35,6 +35,25 @@ local previousRuntime = _G.__LOOT_TRACKER_RUNTIME
 if previousRuntime ~= nil then
 	previousRuntime.active = false
 	previousRuntime.gameLoadingStarted = true
+	-- Prefer the explicit flag over widget IsVisible (unreliable across UI refresh).
+	local trackerVisible = previousRuntime.trackerWindowVisible
+	if trackerVisible == nil then
+		local function IsWidgetVisible(widget)
+			if widget == nil or type(widget.IsVisible) ~= "function" then
+				return false
+			end
+			local ok, visible = pcall(widget.IsVisible, widget)
+			return ok and visible == true
+		end
+		local restoreVisible = IsWidgetVisible(previousRuntime.restoreButton)
+		trackerVisible = IsWidgetVisible(previousRuntime.window) and not restoreVisible
+		LT.uiRefreshRestoreVisible = restoreVisible
+	else
+		trackerVisible = trackerVisible == true
+		LT.uiRefreshRestoreVisible = (not trackerVisible)
+			and previousRuntime.menuMode ~= true
+	end
+	LT.uiRefreshTrackerVisible = trackerVisible == true
 	local function ClearWidgetHandlers(widget)
 		if widget == nil or type(widget.SetHandler) ~= "function" then
 			return
@@ -107,6 +126,8 @@ local runtime = {
 	gameLoadingStarted = false,
 	wasTrackerVisibleBeforeLoading = false,
 	wasRestoreVisibleBeforeLoading = false,
+	-- Explicit open/hidden intent; do not infer from widget IsVisible across refresh/loading.
+	trackerWindowVisible = true,
 	lastKnownTrackerX = nil,
 	lastKnownTrackerY = nil,
 	lastKnownRestoreX = nil,
@@ -186,18 +207,18 @@ function runtime:SuspendForLoading()
 		return
 	end
 
-	local function IsWidgetVisible(widget)
-		if widget == nil or type(widget.IsVisible) ~= "function" then
-			return false
-		end
-		local ok, visible = pcall(widget.IsVisible, widget)
-		return ok and visible == true
+	-- Remember user intent from the flag (and disk), never widget IsVisible.
+	-- Loading hide must not call HideLootTrackerWindow / SaveWindowVisible.
+	local savedVisible = nil
+	if self.LoadWindowVisible ~= nil then
+		savedVisible = self:LoadWindowVisible()
 	end
-
-	-- Only remember visibility here. Do not call GetOffset/Save during loading — offsets are unreliable
-	-- and would overwrite the last good drag/show position used on resume.
-	self.wasTrackerVisibleBeforeLoading = IsWidgetVisible(runtime.window)
-	self.wasRestoreVisibleBeforeLoading = IsWidgetVisible(runtime.restoreButton)
+	if savedVisible ~= nil then
+		self.trackerWindowVisible = savedVisible == true
+	end
+	self.wasTrackerVisibleBeforeLoading = self.trackerWindowVisible == true
+	self.wasRestoreVisibleBeforeLoading = (not self.wasTrackerVisibleBeforeLoading)
+		and self.menuMode ~= true
 	self.gameLoadingStarted = true
 	runtime.inventoryRefreshPending = false
 	runtime.inventoryRefreshPendingElapsed = 0
@@ -247,12 +268,18 @@ function runtime:ResumeAfterLoading()
 	end
 	self.gameLoadingStarted = false
 
+	-- Disk is authoritative (same pattern as quickopts). Fall back to pre-loading flag.
 	local shouldShowTracker = self.wasTrackerVisibleBeforeLoading == true
-	local shouldShowRestore = (not shouldShowTracker)
-		and self.wasRestoreVisibleBeforeLoading == true
-		and not self.menuMode
+	if self.LoadWindowVisible ~= nil then
+		local savedVisible = self:LoadWindowVisible()
+		if savedVisible ~= nil then
+			shouldShowTracker = savedVisible == true
+		end
+	end
+	local shouldShowRestore = (not shouldShowTracker) and not self.menuMode
 	self.wasTrackerVisibleBeforeLoading = false
 	self.wasRestoreVisibleBeforeLoading = false
+	self.trackerWindowVisible = shouldShowTracker
 
 	if shouldShowTracker then
 		local trackerX, trackerY = ResolveTrackerResumePosition()
@@ -261,6 +288,13 @@ function runtime:ResumeAfterLoading()
 	end
 
 	runtime.MarkInventoryDirty(true)
+	-- Keep hidden without going through HideLootTrackerWindow (already saved false on disk).
+	if runtime.window ~= nil then
+		runtime.window:Show(false)
+	end
+	if runtime.SetResizeHandlesVisible ~= nil then
+		runtime:SetResizeHandlesVisible(false)
+	end
 	if shouldShowRestore and runtime.restoreButton ~= nil then
 		local restoreX, restoreY = ResolveRestoreResumePosition()
 		if runtime.AnchorWidgetAtSavedPosition ~= nil then
@@ -270,6 +304,8 @@ function runtime:ResumeAfterLoading()
 		runtime.lastKnownRestoreY = restoreY
 		runtime.restoreButton:Show(true)
 		SafeMethod(runtime.restoreButton, "CorrectOffsetByScreen")
+	elseif runtime.restoreButton ~= nil then
+		runtime.restoreButton:Show(false)
 	end
 end
 
