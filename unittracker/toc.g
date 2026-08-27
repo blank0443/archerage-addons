@@ -3,4 +3,16 @@
 ../globals/button.lua
 ../globals/windowcommon.lua
 ../globals/window.lua
-unit_tracker.lua
+constants.lua
+runtime.lua
+util.lua
+faction.lua
+map.lua
+lists.lua
+hotkeys.lua
+settings.lua
+ui_main.lua
+ui_view.lua
+ui_note.lua
+ui_opts.lua
+events.lua

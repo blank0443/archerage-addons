@@ -1,0 +1,53 @@
+# Unit Tracker Export - 2026-08-27
+# name	unitId	datetime	note	location	guild	faction
+
+[Friendly]
+Garlic		2026-07-14 09:20:54	NA			haranya
+
+[Hostile]
+Oioioioioioi		2026-07-14 09:20:54				
+Kxrlito		2026-07-14 09:20:54			Outcasts	
+Thcyssuo		2026-07-14 09:20:54				haranya
+Dwimmerlaik		2026-07-14 09:20:54				
+Boltyerass		2026-07-14 09:20:54	Robber/ killer			
+Wasurenai		2026-07-14 09:20:54	Killer and robber			
+Heizz		2026-07-14 09:20:54				
+Lycan		2026-07-14 09:20:54			Chaos	haranya
+Coucoouu		2026-07-14 09:20:54	Killer		Once upon a time	
+Xingse		2026-07-14 09:20:54				
+Evelinke		2026-07-14 09:20:54				
+Sakuray		2026-07-14 09:20:54	Killer/robber?			
+Dopalina		2026-07-14 09:20:54				
+Angelofgrief		2026-07-14 09:20:54	Robber yny trade port			
+Bewaren		2026-07-14 09:20:54	Bored PVP Finder			
+Baicaiking		2026-07-14 09:20:54	Chinse Rob, Austera, yny			
+Nssprlte		2026-07-14 09:20:54	Rob			
+Jyjftf		2026-07-14 09:20:54	Rob			
+Qiyue		2026-07-14 09:20:54	Rob		Fire	
+Xiaofeigun		2026-07-14 09:20:54	Rob			
+Teresa		2026-07-14 09:20:54				
+Laoganma		2026-07-14 09:20:54	rob			
+Worldchui		2026-07-14 09:20:54	rob			
+Yjbs		2026-07-14 09:20:54	rob			
+Arachisa		2026-07-14 09:20:54	rob			
+Pinkpototoy		2026-07-14 09:20:54	robber			pirate
+Freeren		2026-07-14 09:20:54				
+Brownpototoy		2026-07-14 09:20:54	robber			pirate
+Xinggg		2026-07-14 09:20:54				
+Heeya		2026-07-14 10:15:29				
+Missyouall		2026-07-15 10:08:11	Reformed? Trade port rob.\nKilled him 2 times in garden.			nuia
+Kiirb		2026-07-15 12:02:42	yny trade port camper		RetardsCrew	pirate
+Onion		2026-07-15 12:57:12	Trade port rob DS			haranya
+North		2026-07-18 05:51:24	Red Killer			
+Akuan		2026-07-18 06:43:38				
+Leexii		2026-07-20 04:17:38	Killing for no reason, Aegis CC			haranya
+Diesel		2026-07-21 06:03:23	Castle Pack Camper		Thx for coming	
+Lyde		2026-07-26 03:34:19	PVP killer CR	15156.9, 11441, 116.71 | zone 20		haranya
+Bob		2026-07-27 14:18:27	PVP Kill no reason	14305.7, 26662.2, 134.56 | zone 102		haranya
+Brielle		2026-07-29 09:51:20	Pirate robber 	15335.1, 13378.1, 107.82 | zone 40	Excuse me	pirate
+Sara		2026-08-23 08:56:55		11142.6, 12116.3, 145.09 | zone 2	IRF	
+Hizoka		2026-08-24 08:02:19	Vyrava stealer loser.			nuia
+Axys		2026-08-24 08:29:18	Killed but not rob	14841.5, 13353.2, 109.7 | zone 40	Chaos	haranya
+Ao		2026-08-24 08:49:17	Pirate Robber	18985.9, 25707.2, 108.44 | zone 36	Excuse me	pirate
+Saarr		2026-08-24 16:30:57	Test	21871.3, 30086.1, 591.1 | zone 110	Disorderly Conduct	nuia
+
